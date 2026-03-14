@@ -1,0 +1,11 @@
+// HiveChat - Protocol Buffer Definitions
+// Compile with: python -m grpc_tools.protoc -I proto --python_out=. --grpc_python_out=. proto/hivechat.proto
+
+syntax = "proto3";
+
+package hivechat;
+
+// TODO: Define services and messages
+// - MessagingService (SendMessage, GetMessages)
+// - RaftService (RequestVote, AppendEntries)
+// - SyncService (SyncTime, SyncMessages)

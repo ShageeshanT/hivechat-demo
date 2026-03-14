@@ -1,0 +1,1 @@
+# HiveChat - Node Package
