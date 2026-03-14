@@ -72,12 +72,12 @@ python client/client.py --server localhost:5001
 
 ## Team Members
 
-| Name | Reg No. | Email | Role |
-|------|---------|-------|------|
-| Member 1 | | | Fault Tolerance |
-| Member 2 | | | Data Replication |
-| Member 3 | | | Time Synchronization |
-| Member 4 | | | Consensus & Agreement |
+| Member   | Name    | Reg. No   |       Role            |
+|----------|---------|-----------|-----------------------|
+| Member 1 | Maheesha| IT24103477| Fault Tolerance       |
+| Member 2 | Sihan   | IT24103532| Data Replication      |
+| Member 3 | Shagee  | IT24103322| Time Synchronization  |
+| Member 4 | Gunitha | IT24610787| Consensus & Agreement |
 
 ## License
 
