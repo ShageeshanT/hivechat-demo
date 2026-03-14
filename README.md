@@ -74,8 +74,8 @@ python client/client.py --server localhost:5001
 
 | Member   | Name    | Reg. No   |       Role            |
 |----------|---------|-----------|-----------------------|
-| Member 1 | Maheesha| IT24103477| Fault Tolerance       |
-| Member 2 | Sihan   | IT24103532| Data Replication      |
+| Member 1 | Maheesha| IT24103477| Data Replication       |
+| Member 2 | Sihan   | IT24103532| Fault Tolerance       |
 | Member 3 | Shagee  | IT24103322| Time Synchronization  |
 | Member 4 | Gunitha | IT24610787| Consensus & Agreement |
 
