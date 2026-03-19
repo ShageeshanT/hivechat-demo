@@ -14,15 +14,10 @@ import time
 import threading
 from typing import Optional
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1: Message Store
 # Stores every message this node holds, along with metadata.
-# ─────────────────────────────────────────────────────────────────────────────
-
 class MessageStore:
-    """
-    In-memory store for messages on a single node.
+    """In-memory store for messages on a single node.
 
     Each message entry looks like:
     {
@@ -79,3 +74,63 @@ class MessageStore:
                 self._store[msg_id]["status"] = "committed"
 
 
+# SECTION 2: Vector Clock
+# Tracks causal ordering of events across nodes.
+# Each node has its own counter. On each event, increment your own counter.
+class VectorClock:
+    """A vector clock for causal ordering of messages.
+
+    Example with 3 nodes (IDs: 1, 2, 3):
+      Node 1 sends msg  → clock becomes {1:1, 2:0, 3:0}
+      Node 2 receives   → clock becomes {1:1, 2:1, 3:0}  (merge + increment own)
+      Node 2 sends msg  → clock becomes {1:1, 2:2, 3:0}
+    """
+
+    def __init__(self, node_id: int, all_node_ids: list[int]):
+        self.node_id = node_id
+        # Initialize every node's counter to 0
+        self.clock: dict[int, int] = {nid: 0 for nid in all_node_ids}
+
+    def tick(self) -> dict[int, int]:
+        """Increment this node's own counter (call before sending a message)."""
+        self.clock[self.node_id] += 1
+        return self.clock.copy()  # Return a snapshot copy
+
+    def update(self, received_clock: dict[int, int]) -> dict[int, int]:
+        """
+        Merge an incoming clock with ours, then tick our own counter.
+        Call this when we RECEIVE a message from another node.
+        """
+        for nid, count in received_clock.items():
+            # Take the maximum of ours vs. the sender's knowledge
+            self.clock[nid] = max(self.clock.get(nid, 0), count)
+        # Also increment our own counter to record that we processed an event
+        self.clock[self.node_id] += 1
+        return self.clock.copy()
+
+    def get(self) -> dict[int, int]:
+        """Return a snapshot of the current clock (safe copy)."""
+        return self.clock.copy()
+
+    @staticmethod
+    def happened_before(clock_a: dict, clock_b: dict) -> bool:
+        """
+        Returns True if event A causally happened before event B.
+        A happened-before B means:
+          - A's clock is <= B's clock in EVERY position, AND
+          - strictly less in at least one position.
+        """
+        less_or_equal = all(clock_a.get(k, 0) <= clock_b.get(k, 0) for k in clock_b)
+        strictly_less  = any(clock_a.get(k, 0) <  clock_b.get(k, 0) for k in clock_b)
+        return less_or_equal and strictly_less
+
+    @staticmethod
+    def concurrent(clock_a: dict, clock_b: dict) -> bool:
+        """
+        Returns True if neither A happened-before B nor B happened-before A.
+        These events are 'concurrent' — happened independently on different nodes.
+        """
+        return (
+            not VectorClock.happened_before(clock_a, clock_b) and
+            not VectorClock.happened_before(clock_b, clock_a)
+        )
