@@ -6,7 +6,6 @@ Strategy: Quorum-Based Replication (N=3, W=2, R=2)
 Consistency: Eventual Consistency with deduplication
 """
 
-from __future__ import annotations  # Allow modern type hints on older Python checkers
 # pyright: basic     # Use Pylance/Pyright as the type checker (not Pyre2)
 
 import uuid
@@ -134,3 +133,209 @@ class VectorClock:
             not VectorClock.happened_before(clock_a, clock_b) and
             not VectorClock.happened_before(clock_b, clock_a)
         )
+
+
+# SECTION 3: Replication Manager
+# Ties everything together: deduplication, quorum writes, quorum reads, sync.
+#
+# CONSENSUS INTERFACE (how this connects to Gunitha's Raft module)
+#
+# The Raft (consensus) module is responsible for:
+#   (a) Electing a LEADER node.
+#   (b) Telling the replication layer WHO the leader is.
+#
+# This module (replication) is responsible for:
+#   (a) USING the leader info to decide where to send writes.
+#   (b) Actually storing and syncing the messages.
+#
+# The two modules talk through TWO simple methods that Gunitha must implement:
+#
+#   consensus.get_leader()  → int  (returns node_id of current leader, or -1)
+#   consensus.is_leader()   → bool (True if THIS node is the leader right now)
+#
+# This replication module passes `consensus` in via the constructor and calls
+# those two methods. That's the ENTIRE interface — nothing else couples them.
+class ReplicationManager:
+    """Manages quorum-based replication of messages across nodes.
+
+    Parameters
+    ----------
+    node_id     : int    This node's unique ID (e.g. 1, 2, or 3)
+    peers       : list   List of peer node addresses ["localhost:5002", ...]
+    all_node_ids: list   All node IDs in the cluster [1, 2, 3]
+    quorum_w    : int    Write quorum (default 2: message committed when 2 nodes ack)
+    quorum_r    : int    Read quorum  (default 2: read from 2 nodes and merge)
+    consensus   : object  Gunitha's consensus module (must have is_leader() method)
+    """
+
+    def __init__(
+        self,
+        node_id: int,
+        peers: list[str],
+        all_node_ids: list[int],
+        quorum_w: int = 2,
+        quorum_r: int = 2,
+        consensus=None,
+    ):
+        self.node_id    = node_id
+        self.peers      = peers          # e.g. ["localhost:5002", "localhost:5003"]
+        self.quorum_w   = quorum_w       # How many acks needed before write is "done"
+        self.quorum_r   = quorum_r       # How many nodes to read from
+        self.consensus  = consensus      # Gunitha's module (can be None for standalone)
+
+        # Sub-components
+        self.store       = MessageStore()
+        self.vector_clock = VectorClock(node_id, all_node_ids)
+
+    #  3a. Deduplication Check 
+
+    def _is_duplicate(self, msg_id: str) -> bool:
+        """Return True if we've already seen this message ID."""
+        return msg_id in self.store.get_ids()
+
+    #  3b. Create a new message (entry point from the client) 
+
+    def create_message(self, chat_id: str, sender: str, content: str) -> dict:
+        """
+        Build a new message dict with a fresh UUID, current timestamp,
+        and the current vector clock snapshot.
+        Called by the server when a client POSTs a new message.
+        """
+        clock_snapshot = self.vector_clock.tick()   # Advance our clock
+        message = {
+            "id":           str(uuid.uuid4()),       # Globally unique ID
+            "chat_id":      chat_id,
+            "sender":       sender,
+            "content":      content,
+            "timestamp":    time.time(),             # Unix epoch float
+            "vector_clock": clock_snapshot,          # Causal position of this message
+            "status":       "pending",               # Will become "committed" after quorum
+        }
+        return message
+
+    #  3c. Quorum Write 
+
+    def write(self, message: dict) -> bool:
+        """
+        Perform a quorum write:
+          1. Save to this node immediately.
+          2. Forward to all peers and count acknowledgements.
+          3. If acks + 1 (self) >= quorum_w, mark committed and return True.
+          4. Otherwise return False (quorum not met).
+
+        NOTE: In the full gRPC version, step 2 sends an RPC to each peer.
+        For now, we simulate with a stub.
+        """
+        if self._is_duplicate(message["id"]):
+            print(f"[Replication] Duplicate detected, ignoring msg {message['id']}")
+            return True  # Already stored, treat as success
+
+        # Step 1: Save locally as "pending"
+        self.store.save(message)
+        acks: int = 1  # Count ourselves
+
+        # Step 2: Forward to peers (in the real version this is a gRPC call)
+        for peer in self.peers:
+            if self._forward_to_peer(peer, message):
+                acks += 1  # type: ignore[operator]
+
+        # Step 3: Check quorum
+        if acks >= self.quorum_w:
+            self.store.mark_committed(message["id"])
+            print(f"[Replication] ✓ Quorum met ({acks}/{len(self.peers)+1}). "
+                  f"Message {message['id']} committed.")
+            return True
+        else:
+            print(f"[Replication] ✗ Quorum NOT met ({acks}/{len(self.peers)+1}). "
+                  f"Message {message['id']} remains pending.")
+            return False
+
+    def _forward_to_peer(self, peer: str, message: dict) -> bool:
+        """
+        Send a message to a peer node and return True if it acknowledged.
+        ── STUB ──  Replace with actual gRPC call in integration phase.
+
+        gRPC call will look like:
+            stub = ReplicationStub(channel)
+            response = stub.ReplicateMessage(ReplicateRequest(message=message))
+            return response.success
+        """
+        print(f"[Replication] Forwarding to {peer} ... (stub, always True for now)")
+        return True  # Stub: assume peer always acks
+
+    # ── 3d. Quorum Read ──────────────────────────────────────────────────────
+
+    def read(self, chat_id: str) -> list[dict]:
+        """
+        Perform a quorum read:
+          1. Read from this node.
+          2. Ask quorum_r-1 peers for their copies.
+          3. Merge and deduplicate all results.
+          4. Sort by vector clock causal order (or timestamp as fallback).
+        """
+        # Start with local messages
+        all_messages = {m["id"]: m for m in self.store.get_by_chat(chat_id)}
+
+        # Gather from peers (stub: in real version, gRPC call to each peer)
+        reads_done: int = 1
+        for peer in self.peers:
+            if reads_done >= self.quorum_r:
+                break
+            peer_msgs = self._read_from_peer(peer, chat_id)
+            for m in peer_msgs:
+                # Deduplication: keep the message that's more up-to-date (committed > pending)
+                if m["id"] not in all_messages or m["status"] == "committed":
+                    all_messages[m["id"]] = m
+            reads_done += 1  # type: ignore[operator]  # Pyre2 false-positive on int +=
+
+        # Sort: use timestamp as primary sort (Time Sync member can refine this)
+        return sorted(all_messages.values(), key=lambda m: m["timestamp"])
+
+    def _read_from_peer(self, peer: str, chat_id: str) -> list[dict]:
+        """
+        Read messages from a peer node.
+        ── STUB ──  Replace with actual gRPC call in integration phase.
+        """
+        print(f"[Replication] Reading from {peer} ... (stub, returns empty for now)")
+        return []  # Stub: peer returns nothing yet
+
+    # ── 3e. Handle Incoming Replica (when a peer forwards a message to us) ───
+
+    def receive_replica(self, message: dict) -> bool:
+        """
+        Called when another node sends us a ReplicateMessage RPC.
+        This is the receiver side of _forward_to_peer.
+        """
+        if self._is_duplicate(message["id"]):
+            return True  # Already have it, acknowledge anyway
+
+        # Merge the incoming vector clock with ours
+        updated_clock = self.vector_clock.update(message["vector_clock"])
+        message["vector_clock"] = updated_clock
+        message["status"] = "committed"  # We trust the sender already achieved quorum
+        self.store.save(message)
+        print(f"[Replication] Received replica for msg {message['id']}")
+        return True
+
+    # ── 3f. Sync / Anti-Entropy (for nodes rejoining after a crash) ──────────
+
+    def get_sync_state(self) -> list[dict]:
+        """
+        Return all messages this node has.
+        Used by a recovering node to ask 'what did I miss?'
+        Fault Tolerance member (Sihan) calls this when a node rejoins.
+        """
+        return self.store.get_all()
+
+    def apply_sync(self, messages_from_peer: list[dict]) -> int:
+        """
+        Apply a batch of messages received from a peer during recovery sync.
+        Returns the count of new messages learned.
+        """
+        new_count: int = 0
+        for message in messages_from_peer:
+            if not self._is_duplicate(message["id"]):
+                self.store.save(message)
+                new_count += 1  # type: ignore[operator]  # Pyre2 false-positive on int +=
+        print(f"[Replication] Sync applied: {new_count} new messages learned.")
+        return new_count
