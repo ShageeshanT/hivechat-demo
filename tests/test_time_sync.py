@@ -4,8 +4,9 @@ Member: Shagee (IT24103322)
 """
 
 import unittest
+import time
 import threading
-from node.time_sync import LamportClock
+from node.time_sync import LamportClock, TimeSyncer
 
 
 class TestLamportClock(unittest.TestCase):
@@ -116,6 +117,105 @@ class TestLamportClock(unittest.TestCase):
 
         # All increments should be accounted for
         self.assertEqual(clock.get(), num_threads * ticks_per_thread)
+
+
+class TestTimeSyncer(unittest.TestCase):
+    """Tests for the TimeSyncer class."""
+
+    def test_initial_state(self):
+        ts = TimeSyncer(node_id=1)
+        self.assertEqual(ts.get_offset(), 0.0)
+        self.assertEqual(ts.get_sample_count(), 0)
+
+    def test_add_sample_updates_offset(self):
+        ts = TimeSyncer(node_id=1)
+        ts._add_sample(0.005)
+        self.assertAlmostEqual(ts.get_offset(), 0.005)
+
+    def test_median_filtering(self):
+        """Median should filter out outlier samples."""
+        ts = TimeSyncer(node_id=1)
+        # Add mostly small offsets with one big outlier
+        for val in [0.001, 0.002, 0.001, 0.050, 0.002]:
+            ts._add_sample(val)
+        # Median of [0.001, 0.002, 0.001, 0.050, 0.002] = 0.002
+        self.assertAlmostEqual(ts.get_offset(), 0.002)
+
+    def test_sample_window_limit(self):
+        """Only the last SAMPLE_COUNT samples should be kept."""
+        ts = TimeSyncer(node_id=1)
+        # Fill beyond the sample window
+        for i in range(ts.SAMPLE_COUNT + 5):
+            ts._add_sample(0.001 * i)
+        self.assertEqual(ts.get_sample_count(), ts.SAMPLE_COUNT)
+
+    def test_get_adjusted_time_applies_offset(self):
+        ts = TimeSyncer(node_id=1)
+        ts._add_sample(0.010)  # 10 ms offset
+
+        raw = time.time()
+        adjusted = ts.get_adjusted_time()
+
+        # adjusted should be ~10 ms ahead of raw
+        diff = adjusted - raw
+        self.assertAlmostEqual(diff, 0.010, places=2)
+
+    def test_correct_timestamp_with_no_remote_offset(self):
+        ts = TimeSyncer(node_id=1)
+        ts._add_sample(0.005)  # our offset is 5 ms
+
+        remote_ts = 1000.0
+        corrected = ts.correct_timestamp(remote_ts)
+        # corrected = remote_ts - 0 + 0.005 = 1000.005
+        self.assertAlmostEqual(corrected, 1000.005)
+
+    def test_correct_timestamp_with_remote_offset(self):
+        ts = TimeSyncer(node_id=1)
+        ts._add_sample(0.005)  # our offset is 5 ms
+
+        remote_ts = 1000.0
+        corrected = ts.correct_timestamp(remote_ts, remote_offset=0.003)
+        # corrected = 1000.0 - 0.003 + 0.005 = 1000.002
+        self.assertAlmostEqual(corrected, 1000.002)
+
+    def test_set_reference_clears_samples(self):
+        ts = TimeSyncer(node_id=1, reference_addr="localhost:5002")
+        ts._add_sample(0.010)
+        ts._add_sample(0.012)
+        self.assertEqual(ts.get_sample_count(), 2)
+
+        ts.set_reference("localhost:5003")
+        self.assertEqual(ts.get_sample_count(), 0)
+        self.assertEqual(ts.get_offset(), 0.0)
+
+    def test_do_sync_adds_sample(self):
+        """_do_sync (stub) should produce an offset sample."""
+        ts = TimeSyncer(node_id=1, reference_addr="localhost:5002")
+        self.assertEqual(ts.get_sample_count(), 0)
+
+        ts._do_sync()
+        self.assertEqual(ts.get_sample_count(), 1)
+        # Stub simulates 1 ms ahead, so offset should be roughly positive
+        self.assertGreater(ts.get_offset(), 0)
+
+    def test_lamport_clock_embedded(self):
+        """TimeSyncer should carry a LamportClock instance."""
+        ts = TimeSyncer(node_id=1)
+        t1 = ts.lamport.tick()
+        t2 = ts.lamport.tick()
+        self.assertEqual(t1, 1)
+        self.assertEqual(t2, 2)
+
+    def test_background_thread_starts_and_stops(self):
+        """start() should launch a daemon thread, stop() should signal it."""
+        ts = TimeSyncer(node_id=1, reference_addr="localhost:5002")
+        ts.start()
+        time.sleep(0.1)  # let thread spin up
+        self.assertTrue(ts._running)
+
+        ts.stop()
+        time.sleep(0.1)
+        self.assertFalse(ts._running)
 
 
 if __name__ == "__main__":
