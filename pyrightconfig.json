@@ -1,0 +1,13 @@
+{
+  "pythonVersion": "3.10",
+  "include": [
+    "node",
+    "tests",
+    "client"
+  ],
+  "extraPaths": [
+    "."
+  ],
+  "venvPath": ".",
+  "venv": "venv"
+}
