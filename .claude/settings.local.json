@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -m markitdown \"C:\\\\Users\\\\shage\\\\Desktop\\\\DS\\\\lecs\\\\Clock Synchronization.pptx\")",
+      "Bash(find /c/Users/shage/Desktop/HiveChat/hivechat -type d -not -path */.*)",
+      "Bash(wc -l /c/Users/shage/Desktop/HiveChat/hivechat/node/*.py /c/Users/shage/Desktop/HiveChat/hivechat/client/*.py /c/Users/shage/Desktop/HiveChat/hivechat/tests/*.py)"
+    ]
+  }
+}
