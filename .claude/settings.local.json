@@ -4,7 +4,9 @@
       "Bash(pip install:*)",
       "Bash(python -m markitdown \"C:\\\\Users\\\\shage\\\\Desktop\\\\DS\\\\lecs\\\\Clock Synchronization.pptx\")",
       "Bash(find /c/Users/shage/Desktop/HiveChat/hivechat -type d -not -path */.*)",
-      "Bash(wc -l /c/Users/shage/Desktop/HiveChat/hivechat/node/*.py /c/Users/shage/Desktop/HiveChat/hivechat/client/*.py /c/Users/shage/Desktop/HiveChat/hivechat/tests/*.py)"
+      "Bash(wc -l /c/Users/shage/Desktop/HiveChat/hivechat/node/*.py /c/Users/shage/Desktop/HiveChat/hivechat/client/*.py /c/Users/shage/Desktop/HiveChat/hivechat/tests/*.py)",
+      "Bash(python -m pytest tests/test_time_sync.py -v)",
+      "Bash(python -m unittest tests.test_time_sync -v)"
     ]
   }
 }
