@@ -221,7 +221,113 @@ class TimeSyncer:
             return len(self._samples)
 
 
-# TODO: Implement MessageReorderer (causal delivery buffer)
-# - Buffer messages that arrive out of causal order
-# - Release them once all dependencies are satisfied
-# - Use vector clocks to check causal readiness
+# SECTION 3: Causal Message Reordering
+# Buffers messages that arrive before their causal dependencies and
+# releases them in the correct order once all dependencies are met.
+# Uses vector clocks to determine causal readiness.
+class MessageReorderer:
+    """Buffers out-of-order messages and delivers them in causal order.
+
+    When a message arrives whose vector clock shows it depends on a
+    message we haven't delivered yet, we hold it in a buffer.  Once
+    the missing dependency arrives, we flush everything that is now
+    unblocked.
+
+    Expected message dict format:
+        {
+            "id":           str,
+            "sender_id":    int,
+            "vector_clock": {node_id: int, ...},
+            "lamport_time": int,
+            "timestamp":    float,
+            "content":      str,
+        }
+
+    Integration:
+        reorderer = MessageReorderer()
+        reorderer.try_deliver(msg, callback_fn)
+        # callback_fn is called for each message in causal order.
+    """
+
+    def __init__(self):
+        self._delivered: dict[int, int] = {}   # node_id -> highest delivered seq
+        self._delivered_ids: set[str]   = set()
+        self._buffer: list[dict]        = []
+        self._lock = threading.Lock()
+
+    def try_deliver(self, message: dict, on_deliver) -> None:
+        """Attempt to deliver a message, buffering it if dependencies are unmet.
+
+        Parameters
+        ----------
+        message : dict
+            The incoming message (must contain 'id', 'sender_id', 'vector_clock').
+        on_deliver : callable
+            Callback invoked for each message that is ready for delivery.
+        """
+        with self._lock:
+            if message["id"] in self._delivered_ids:
+                return  # duplicate, skip
+            self._buffer.append(message)
+            self._flush(on_deliver)
+
+    def _flush(self, on_deliver) -> None:
+        """Release all buffered messages whose causal dependencies are met."""
+        changed = True
+        while changed:
+            changed = False
+            still_buffered = []
+            for msg in self._buffer:
+                if self._can_deliver(msg):
+                    on_deliver(msg)
+                    self._mark_delivered(msg)
+                    changed = True
+                else:
+                    still_buffered.append(msg)
+            self._buffer = still_buffered
+
+    def _can_deliver(self, msg: dict) -> bool:
+        """Check whether all causal dependencies for this message are satisfied.
+
+        A message from node S with vector_clock V can be delivered when:
+          - V[S] == delivered[S] + 1  (it's the next expected from sender)
+          - For all other nodes N: V[N] <= delivered[N]
+            (we've already seen everything the sender saw)
+        """
+        vc = msg["vector_clock"]
+        sender = msg["sender_id"]
+
+        for node_id_str, seq in vc.items():
+            node_id = int(node_id_str)
+            delivered_seq = self._delivered.get(node_id, 0)
+
+            if node_id == sender:
+                # Must be the next expected sequence from the sender
+                if seq != delivered_seq + 1:
+                    return False
+            else:
+                # Must have already delivered everything the sender saw
+                if seq > delivered_seq:
+                    return False
+
+        return True
+
+    def _mark_delivered(self, msg: dict) -> None:
+        """Record that a message has been delivered."""
+        self._delivered_ids.add(msg["id"])
+        sender = msg["sender_id"]
+        sender_seq = msg["vector_clock"].get(str(sender),
+                                              msg["vector_clock"].get(sender, 0))
+        current = self._delivered.get(sender, 0)
+        if sender_seq > current:
+            self._delivered[sender] = sender_seq
+
+    def get_buffer_size(self) -> int:
+        """Return the number of messages currently buffered."""
+        with self._lock:
+            return len(self._buffer)
+
+    def get_delivered_count(self) -> int:
+        """Return the number of messages delivered so far."""
+        with self._lock:
+            return len(self._delivered_ids)
