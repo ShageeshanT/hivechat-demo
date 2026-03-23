@@ -6,7 +6,7 @@ Member: Shagee (IT24103322)
 import unittest
 import time
 import threading
-from node.time_sync import LamportClock, TimeSyncer
+from node.time_sync import LamportClock, TimeSyncer, MessageReorderer
 
 
 class TestLamportClock(unittest.TestCase):
@@ -216,6 +216,167 @@ class TestTimeSyncer(unittest.TestCase):
         ts.stop()
         time.sleep(0.1)
         self.assertFalse(ts._running)
+
+
+class TestMessageReorderer(unittest.TestCase):
+    """Tests for the MessageReorderer causal delivery buffer."""
+
+    def _make_msg(self, msg_id, sender_id, vector_clock, lamport_time=1):
+        """Helper to create a message dict."""
+        return {
+            "id": msg_id,
+            "sender_id": sender_id,
+            "vector_clock": vector_clock,
+            "lamport_time": lamport_time,
+            "timestamp": time.time(),
+            "content": f"Message {msg_id}",
+        }
+
+    def test_initial_state(self):
+        r = MessageReorderer()
+        self.assertEqual(r.get_buffer_size(), 0)
+        self.assertEqual(r.get_delivered_count(), 0)
+
+    def test_deliver_single_message(self):
+        """First message from a node (seq 1) should deliver immediately."""
+        r = MessageReorderer()
+        delivered = []
+
+        msg = self._make_msg("m1", sender_id=1, vector_clock={"1": 1})
+        r.try_deliver(msg, delivered.append)
+
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0]["id"], "m1")
+
+    def test_in_order_delivery(self):
+        """Messages arriving in causal order should all deliver immediately."""
+        r = MessageReorderer()
+        delivered = []
+
+        m1 = self._make_msg("m1", sender_id=1, vector_clock={"1": 1})
+        m2 = self._make_msg("m2", sender_id=1, vector_clock={"1": 2})
+        m3 = self._make_msg("m3", sender_id=1, vector_clock={"1": 3})
+
+        r.try_deliver(m1, delivered.append)
+        r.try_deliver(m2, delivered.append)
+        r.try_deliver(m3, delivered.append)
+
+        self.assertEqual(len(delivered), 3)
+        self.assertEqual([m["id"] for m in delivered], ["m1", "m2", "m3"])
+
+    def test_out_of_order_buffered_then_flushed(self):
+        """A message arriving before its dependency should be buffered."""
+        r = MessageReorderer()
+        delivered = []
+
+        # m2 arrives first (seq 2 from node 1), but m1 (seq 1) hasn't arrived
+        m2 = self._make_msg("m2", sender_id=1, vector_clock={"1": 2})
+        r.try_deliver(m2, delivered.append)
+        self.assertEqual(len(delivered), 0)
+        self.assertEqual(r.get_buffer_size(), 1)
+
+        # Now m1 arrives — both should flush in order
+        m1 = self._make_msg("m1", sender_id=1, vector_clock={"1": 1})
+        r.try_deliver(m1, delivered.append)
+
+        self.assertEqual(len(delivered), 2)
+        self.assertEqual(delivered[0]["id"], "m1")
+        self.assertEqual(delivered[1]["id"], "m2")
+        self.assertEqual(r.get_buffer_size(), 0)
+
+    def test_cross_node_dependency(self):
+        """Message from node 2 that depends on node 1's message."""
+        r = MessageReorderer()
+        delivered = []
+
+        # Node 2 sends msg that depends on node 1 seq 1
+        m_from_2 = self._make_msg("m2", sender_id=2,
+                                   vector_clock={"1": 1, "2": 1})
+        r.try_deliver(m_from_2, delivered.append)
+        # Should be buffered — we haven't seen node 1 seq 1 yet
+        self.assertEqual(len(delivered), 0)
+
+        # Node 1's message arrives
+        m_from_1 = self._make_msg("m1", sender_id=1,
+                                   vector_clock={"1": 1})
+        r.try_deliver(m_from_1, delivered.append)
+
+        # Both should now be delivered
+        self.assertEqual(len(delivered), 2)
+        self.assertEqual(delivered[0]["id"], "m1")
+        self.assertEqual(delivered[1]["id"], "m2")
+
+    def test_duplicate_message_ignored(self):
+        """Same message ID delivered twice should be ignored the second time."""
+        r = MessageReorderer()
+        delivered = []
+
+        msg = self._make_msg("m1", sender_id=1, vector_clock={"1": 1})
+        r.try_deliver(msg, delivered.append)
+        r.try_deliver(msg, delivered.append)  # duplicate
+
+        self.assertEqual(len(delivered), 1)
+
+    def test_three_node_causal_chain(self):
+        """N1 -> N2 -> N3: messages must respect the full causal chain."""
+        r = MessageReorderer()
+        delivered = []
+
+        # N3's message depends on N2 which depends on N1
+        m3 = self._make_msg("m3", sender_id=3,
+                             vector_clock={"1": 1, "2": 1, "3": 1})
+        m2 = self._make_msg("m2", sender_id=2,
+                             vector_clock={"1": 1, "2": 1})
+        m1 = self._make_msg("m1", sender_id=1,
+                             vector_clock={"1": 1})
+
+        # Arrive in reverse order
+        r.try_deliver(m3, delivered.append)
+        self.assertEqual(len(delivered), 0)
+
+        r.try_deliver(m2, delivered.append)
+        self.assertEqual(len(delivered), 0)
+
+        r.try_deliver(m1, delivered.append)
+        # All three should flush: m1 -> m2 -> m3
+        self.assertEqual(len(delivered), 3)
+        self.assertEqual([m["id"] for m in delivered], ["m1", "m2", "m3"])
+
+    def test_concurrent_messages_from_different_nodes(self):
+        """Independent messages from different nodes should deliver immediately."""
+        r = MessageReorderer()
+        delivered = []
+
+        m1 = self._make_msg("m1", sender_id=1, vector_clock={"1": 1})
+        m2 = self._make_msg("m2", sender_id=2, vector_clock={"2": 1})
+
+        r.try_deliver(m1, delivered.append)
+        r.try_deliver(m2, delivered.append)
+
+        self.assertEqual(len(delivered), 2)
+
+    def test_gap_in_sequence_buffers(self):
+        """A gap in sender's sequence (seq 1 then seq 3) should buffer seq 3."""
+        r = MessageReorderer()
+        delivered = []
+
+        m1 = self._make_msg("m1", sender_id=1, vector_clock={"1": 1})
+        m3 = self._make_msg("m3", sender_id=1, vector_clock={"1": 3})
+
+        r.try_deliver(m1, delivered.append)
+        self.assertEqual(len(delivered), 1)
+
+        r.try_deliver(m3, delivered.append)
+        # m3 should be buffered — seq 2 is missing
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(r.get_buffer_size(), 1)
+
+        # Fill the gap
+        m2 = self._make_msg("m2", sender_id=1, vector_clock={"1": 2})
+        r.try_deliver(m2, delivered.append)
+
+        self.assertEqual(len(delivered), 3)
+        self.assertEqual(r.get_buffer_size(), 0)
 
 
 if __name__ == "__main__":
