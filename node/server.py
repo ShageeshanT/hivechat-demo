@@ -1,286 +1,386 @@
 """
-HiveChat - Main Server Node
+HiveChat – Main Server Node
+============================
 Entry point for starting a distributed messaging node.
-Includes integration for Fault Tolerance.
+Integrates:
+  • Fault Tolerance  (Member 2 – Sihan)
+  • gRPC server      (MessagingService + FaultService)
+
+Run:
+    python node/server.py --node-id 1 --port 5001
+    python node/server.py --node-id 2 --port 5002 --peers localhost:5001
+    python node/server.py --node-id 3 --port 5003 --peers localhost:5001,localhost:5002
 """
 
 import argparse
 import sys
 import time
+from concurrent import futures
 from pathlib import Path
 
-# Allow imports from project root when running:
-# python node/server.py ...
+import grpc
+
+# ── path setup (works whether run from project root or node/) ─────────────────
 CURRENT_FILE = Path(__file__).resolve()
 PROJECT_ROOT = CURRENT_FILE.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+# ── generated gRPC stubs ──────────────────────────────────────────────────────
+from proto import hivechat_pb2, hivechat_pb2_grpc
 from node.fault import FaultToleranceManager
 
+# Heartbeat RPC timeout (seconds) – short so failure detection stays responsive
+HEARTBEAT_TIMEOUT = 2.0
+# Replication RPC timeout
+REPLICATE_TIMEOUT = 5.0
+# Recovery fetch timeout
+FETCH_TIMEOUT = 10.0
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="HiveChat Node")
-    parser.add_argument("--node-id", type=int, required=True, help="Unique node ID")
-    parser.add_argument("--port", type=int, required=True, help="Port to listen on")
-    parser.add_argument(
-        "--peers",
-        type=str,
-        default="",
-        help="Comma-separated list of peer addresses (e.g. localhost:5002,localhost:5003)",
-    )
-    return parser.parse_args()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# gRPC Servicers  (server-side RPC implementations)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MessagingServicer(hivechat_pb2_grpc.MessagingServiceServicer):
+    """
+    Handles client → node RPCs:
+      • SendMessage – client submits a new chat message
+      • GetMessages – recovering node pulls all stored messages
+    """
+
+    def __init__(self, node: "HiveChatNode"):
+        self._node = node
+
+    def SendMessage(self, request, context):
+        msg_proto = request.message
+        message = {
+            "message_id":  msg_proto.message_id,
+            "sender":      msg_proto.sender,
+            "receiver":    msg_proto.receiver,
+            "content":     msg_proto.content,
+            "timestamp":   msg_proto.timestamp,
+            "origin_node": msg_proto.origin_node,
+        }
+
+        # Let fault manager handle storage + replication
+        result = self._node.fault_manager.handle_client_message(message)
+
+        return hivechat_pb2.StatusResponse(
+            success=True,
+            status=result["status"],
+            message_id=result["message_id"],
+            node_id=result["node_id"],
+        )
+
+    def GetMessages(self, request, context):
+        """Return all locally stored messages (used by recovering peers)."""
+        all_msgs = self._node.fault_manager.export_messages()
+        proto_msgs = [
+            hivechat_pb2.ChatMessage(
+                message_id  = m["message_id"],
+                sender      = m["sender"],
+                receiver    = m["receiver"],
+                content     = m["content"],
+                timestamp   = float(m["timestamp"]),
+                origin_node = m["origin_node"],
+            )
+            for m in all_msgs
+        ]
+        return hivechat_pb2.GetMessagesResponse(messages=proto_msgs)
+
+
+class FaultServicer(hivechat_pb2_grpc.FaultServiceServicer):
+    """
+    Handles node → node RPCs for fault tolerance:
+      • Heartbeat – liveness probe
+      • Replicate – peer pushing a message replica
+    """
+
+    def __init__(self, node: "HiveChatNode"):
+        self._node = node
+
+    def Heartbeat(self, request, context):
+        """Always respond alive=True while this node is running."""
+        return hivechat_pb2.HeartbeatResponse(
+            alive=True,
+            node_id=f"node{self._node.node_id}",
+        )
+
+    def Replicate(self, request, context):
+        msg_proto = request.message
+        message = {
+            "message_id":  msg_proto.message_id,
+            "sender":      msg_proto.sender,
+            "receiver":    msg_proto.receiver,
+            "content":     msg_proto.content,
+            "timestamp":   msg_proto.timestamp,
+            "origin_node": msg_proto.origin_node,
+        }
+
+        result = self._node.fault_manager.handle_replica_message(message)
+
+        return hivechat_pb2.StatusResponse(
+            success=True,
+            status=result["status"],
+            message_id=result["message_id"],
+            node_id=result["node_id"],
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HiveChatNode
+# ─────────────────────────────────────────────────────────────────────────────
 
 class HiveChatNode:
     """
     Main node wrapper for HiveChat.
 
-    This class wires Fault Tolerance into the server lifecycle.
-    Other modules such as consensus, replication, and time sync
-    can later be connected here as well.
+    Wires the gRPC server together with the Fault Tolerance module.
+    Other modules (Consensus, Replication, Time Sync) plug in here later.
     """
 
-    def __init__(self, node_id: int, port: int, peers: list[str]):
+    def __init__(self, node_id: int, port: int, peers: list):
         self.node_id = node_id
-        self.port = port
+        self.port    = port
         self.address = f"localhost:{port}"
-        self.peers = peers
+        self.peers   = peers
 
-        # Create data directory for persistent storage
+        # Persistent storage path for this node
         data_dir = PROJECT_ROOT / "node" / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-
         store_path = str(data_dir / f"node{self.node_id}_messages.json")
 
-        # Fault tolerance manager
+        # ── Fault Tolerance Manager ───────────────────────────────────────
         self.fault_manager = FaultToleranceManager(
             node_id=f"node{self.node_id}",
             peers=self.peers,
-            heartbeat_fn=self.heartbeat_peer,
-            replicate_fn=self.replicate_to_peer,
-            fetch_messages_fn=self.fetch_messages_from_peer,
+            heartbeat_fn=self._heartbeat_peer,
+            replicate_fn=self._replicate_to_peer,
+            fetch_messages_fn=self._fetch_messages_from_peer,
             store_path=store_path,
             replication_factor=2,
+            heartbeat_interval=3.0,
+            missed_threshold=3,        # 3 missed beats → mark DEAD
         )
 
-    # ------------------------------------------------------------------
-    # Placeholder integration points
-    # Replace these later with your real transport / RPC / gRPC logic
-    # ------------------------------------------------------------------
+        # ── gRPC server (created in start()) ─────────────────────────────
+        self._grpc_server = None
 
-    def heartbeat_peer(self, peer_address: str) -> bool:
+    # ── gRPC transport helpers ────────────────────────────────────────────
+    # These replace the old placeholders with real RPC calls.
+
+    def _heartbeat_peer(self, peer_address: str) -> bool:
         """
-        Check whether a peer is alive.
-
-        Current version:
-        - simple placeholder
-        - assumes peer is alive if its address format is valid
-
-        Later you should replace this with real heartbeat logic,
-        for example a gRPC ping or socket health check.
+        Real heartbeat: open a short-lived gRPC channel, call Heartbeat RPC.
+        Returns True only if the peer responds alive=True within timeout.
         """
         try:
-            if not peer_address:
-                return False
-
-            if ":" not in peer_address:
-                return False
-
-            host, port = peer_address.split(":", 1)
-            if not host or not port:
-                return False
-
-            int(port)  # validate port format
-            return True
+            with grpc.insecure_channel(peer_address) as channel:
+                stub    = hivechat_pb2_grpc.FaultServiceStub(channel)
+                request = hivechat_pb2.HeartbeatRequest(
+                    sender_node_id=f"node{self.node_id}"
+                )
+                resp = stub.Heartbeat(request, timeout=HEARTBEAT_TIMEOUT)
+                return resp.alive
         except Exception:
             return False
 
-    def replicate_to_peer(self, peer_address: str, message: dict) -> bool:
+    def _replicate_to_peer(self, peer_address: str, message: dict) -> bool:
         """
-        Send a replica message to another peer.
-
-        Current version:
-        - placeholder for integration
-        - prints replication activity
-        - returns True to simulate successful replication
-
-        Later replace with actual peer-to-peer communication.
+        Real replication: open a gRPC channel, call Replicate RPC.
+        Returns True on success.
         """
         try:
-            print(
-                f"[Replication] node{self.node_id} -> {peer_address} "
-                f"(message_id={message['message_id']})"
-            )
-            return True
-        except Exception:
+            with grpc.insecure_channel(peer_address) as channel:
+                stub    = hivechat_pb2_grpc.FaultServiceStub(channel)
+                request = hivechat_pb2.ReplicateRequest(
+                    source_node_id=f"node{self.node_id}",
+                    message=hivechat_pb2.ChatMessage(
+                        message_id  = message["message_id"],
+                        sender      = message["sender"],
+                        receiver    = message["receiver"],
+                        content     = message["content"],
+                        timestamp   = float(message["timestamp"]),
+                        origin_node = message["origin_node"],
+                    ),
+                )
+                resp = stub.Replicate(request, timeout=REPLICATE_TIMEOUT)
+                print(
+                    f"[Replication] node{self.node_id} → {peer_address} "
+                    f"(id={message['message_id'][:8]}…) status={resp.status}"
+                )
+                return resp.success
+        except Exception as exc:
+            print(f"[Replication] FAILED → {peer_address}: {exc}")
             return False
 
-    def fetch_messages_from_peer(self, peer_address: str):
+    def _fetch_messages_from_peer(self, peer_address: str) -> list:
         """
-        Fetch all messages from a peer during recovery.
-
-        Current version:
-        - placeholder for integration
-        - returns empty list
-
-        Later replace with actual remote fetch logic.
+        Real recovery fetch: call GetMessages RPC and convert proto → dicts.
         """
         try:
-            print(f"[Recovery] Requesting messages from peer {peer_address}")
-            return []
-        except Exception:
+            with grpc.insecure_channel(peer_address) as channel:
+                stub    = hivechat_pb2_grpc.MessagingServiceStub(channel)
+                request = hivechat_pb2.GetMessagesRequest(
+                    node_id=f"node{self.node_id}"
+                )
+                resp = stub.GetMessages(request, timeout=FETCH_TIMEOUT)
+                messages = [
+                    {
+                        "message_id":  m.message_id,
+                        "sender":      m.sender,
+                        "receiver":    m.receiver,
+                        "content":     m.content,
+                        "timestamp":   m.timestamp,
+                        "origin_node": m.origin_node,
+                    }
+                    for m in resp.messages
+                ]
+                print(
+                    f"[Recovery] Fetched {len(messages)} message(s) "
+                    f"from peer {peer_address}"
+                )
+                return messages
+        except Exception as exc:
+            print(f"[Recovery] FAILED fetching from {peer_address}: {exc}")
             return []
 
-    # ------------------------------------------------------------------
-    # Server lifecycle
-    # ------------------------------------------------------------------
+    # ── server lifecycle ──────────────────────────────────────────────────
 
     def start(self):
-        """
-        Start all node services.
-        """
         print(f"[HiveChat] Starting Node {self.node_id} on port {self.port}")
-        print(f"[HiveChat] Address: {self.address}")
-        print(f"[HiveChat] Peers: {self.peers if self.peers else 'None (standalone mode)'}")
+        print(f"[HiveChat] Address : {self.address}")
+        print(f"[HiveChat] Peers   : {self.peers or 'None (standalone)'}")
 
-        # TODO: Initialize components
-        # 1. Time Sync
-        print("[HiveChat] Initializing Time Sync...")
+        # ── TODO placeholders for other members ──────────────────────────
+        print("[HiveChat] [TODO] Time Sync module …")
+        print("[HiveChat] [TODO] Consensus (Raft) module …")
+        print("[HiveChat] [TODO] Data Replication module …")
 
-        # 2. Consensus (Raft)
-        print("[HiveChat] Initializing Consensus module...")
+        # ── Start gRPC server ─────────────────────────────────────────────
+        self._grpc_server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=10)
+        )
+        hivechat_pb2_grpc.add_MessagingServiceServicer_to_server(
+            MessagingServicer(self), self._grpc_server
+        )
+        hivechat_pb2_grpc.add_FaultServiceServicer_to_server(
+            FaultServicer(self), self._grpc_server
+        )
+        self._grpc_server.add_insecure_port(f"[::]:{self.port}")
+        self._grpc_server.start()
+        print(f"[HiveChat] gRPC server listening on port {self.port}")
 
-        # 3. Data Replication
-        print("[HiveChat] Initializing Replication module...")
-
-        # 4. Fault Tolerance
-        print("[HiveChat] Initializing Fault Tolerance module...")
+        # ── Start Fault Tolerance ─────────────────────────────────────────
+        print("[HiveChat] Initializing Fault Tolerance module …")
         self.fault_manager.start()
 
-        print(f"[HiveChat] Node {self.node_id} is ready.")
+        print(f"[HiveChat] Node {self.node_id} is ready.\n")
 
     def stop(self):
-        """
-        Stop node services gracefully.
-        """
-        print(f"[HiveChat] Shutting down Node {self.node_id}...")
+        print(f"\n[HiveChat] Shutting down Node {self.node_id} …")
         self.fault_manager.stop()
+        if self._grpc_server:
+            self._grpc_server.stop(grace=5)
         print(f"[HiveChat] Node {self.node_id} stopped.")
 
-    # ------------------------------------------------------------------
-    # Fault tolerance helper methods
-    # These are the methods your project can call from client/RPC layer
-    # ------------------------------------------------------------------
+    def wait_for_termination(self):
+        """Block until the gRPC server shuts down (Ctrl+C)."""
+        if self._grpc_server:
+            self._grpc_server.wait_for_termination()
+
+    # ── public helpers (used by demo loop / other modules) ───────────────
 
     def handle_client_message(self, sender: str, receiver: str, content: str) -> dict:
-        """
-        Called when this node receives a new client message.
-        """
         message = self.fault_manager.build_message(sender, receiver, content)
-        result = self.fault_manager.handle_client_message(message)
-        return result
+        return self.fault_manager.handle_client_message(message)
 
     def handle_replica_message(self, message: dict) -> dict:
-        """
-        Called when another node sends a replica.
-        """
-        result = self.fault_manager.handle_replica_message(message)
-        return result
+        return self.fault_manager.handle_replica_message(message)
 
     def export_messages(self):
-        """
-        Used by recovering nodes.
-        """
         return self.fault_manager.export_messages()
 
     def get_peer_status(self):
-        """
-        View peer health.
-        """
         return self.fault_manager.get_peer_status()
 
     def get_metrics(self):
-        """
-        View redundancy and recovery metrics.
-        """
         return self.fault_manager.get_metrics()
 
-    # ------------------------------------------------------------------
-    # Demo loop
-    # This is optional, but useful so your server does something visible
-    # while you are still building the full project.
-    # ------------------------------------------------------------------
+    # ── interactive demo loop ─────────────────────────────────────────────
 
     def run_demo_loop(self):
-        """
-        Simple interactive loop for testing fault tolerance manually.
-        """
-        print("\n[Demo Mode]")
-        print("Commands:")
+        print("[Demo Mode]  Commands:")
         print("  send <sender> <receiver> <message>")
-        print("  metrics")
-        print("  peers")
-        print("  messages")
-        print("  exit\n")
+        print("  metrics | peers | messages | exit\n")
 
         while True:
             try:
                 command = input(f"node{self.node_id}> ").strip()
-
                 if not command:
                     continue
 
                 if command == "exit":
                     break
-
-                if command == "metrics":
-                    print(self.get_metrics())
-                    continue
-
-                if command == "peers":
+                elif command == "metrics":
+                    import json
+                    print(json.dumps(self.get_metrics(), indent=2))
+                elif command == "peers":
                     print(self.get_peer_status())
-                    continue
-
-                if command == "messages":
-                    print(self.export_messages())
-                    continue
-
-                if command.startswith("send "):
+                elif command == "messages":
+                    import json
+                    print(json.dumps(self.export_messages(), indent=2))
+                elif command.startswith("send "):
                     parts = command.split(" ", 3)
                     if len(parts) < 4:
                         print("Usage: send <sender> <receiver> <message>")
                         continue
-
-                    sender = parts[1]
-                    receiver = parts[2]
-                    content = parts[3]
-
-                    result = self.handle_client_message(sender, receiver, content)
+                    result = self.handle_client_message(parts[1], parts[2], parts[3])
                     print(result)
-                    continue
+                else:
+                    print("Unknown command.")
 
-                print("Unknown command.")
             except KeyboardInterrupt:
-                print("\n[HiveChat] Interrupted by user.")
+                print("\n[HiveChat] Interrupted.")
                 break
             except Exception as exc:
                 print(f"[HiveChat] Error: {exc}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="HiveChat Node")
+    parser.add_argument("--node-id", type=int, required=True)
+    parser.add_argument("--port",    type=int, required=True)
+    parser.add_argument(
+        "--peers", type=str, default="",
+        help="Comma-separated peer addresses, e.g. localhost:5002,localhost:5003"
+    )
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="Run interactive demo loop instead of blocking on gRPC"
+    )
+    return parser.parse_args()
+
+
 def main():
-    args = parse_args()
+    args  = parse_args()
     peers = [p.strip() for p in args.peers.split(",") if p.strip()]
 
-    node = HiveChatNode(
-        node_id=args.node_id,
-        port=args.port,
-        peers=peers,
-    )
+    node = HiveChatNode(node_id=args.node_id, port=args.port, peers=peers)
 
     try:
         node.start()
-        node.run_demo_loop()
+        if args.demo:
+            node.run_demo_loop()
+        else:
+            node.wait_for_termination()
+    except KeyboardInterrupt:
+        pass
     finally:
         node.stop()
 
