@@ -22,8 +22,18 @@ Interface contract:
   Consensus calls    →  replication.apply_committed_entry(entry)
 """
 
-# TODO: Implement Raft consensus
-# - Leader election via randomized timeouts
-# - Heartbeat mechanism (AppendEntries RPC)
-# - Log replication from leader to followers
-# - Term tracking and vote handling
+from enum import Enum
+from typing import Optional
+
+# Node States
+# Every Raft node is in exactly one of these three states at any moment.
+#   FOLLOWER  – Default state. Passively accepts RPCs from leaders/candidates.
+#   CANDIDATE – Actively trying to become leader (started an election).
+#   LEADER    – Coordinates the cluster; the ONLY node that accepts client writes.
+
+class NodeState(Enum):
+    """Possible states of a Raft node."""
+    FOLLOWER = "FOLLOWER"
+    CANDIDATE = "CANDIDATE"
+    LEADER = "LEADER"
+
