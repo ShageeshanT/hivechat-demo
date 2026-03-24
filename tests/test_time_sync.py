@@ -379,5 +379,55 @@ class TestMessageReorderer(unittest.TestCase):
         self.assertEqual(r.get_buffer_size(), 0)
 
 
+    def test_buffer_timeout_force_delivers(self):
+        """A message stuck in the buffer past the timeout should be force-delivered."""
+        r = MessageReorderer(buffer_timeout=0.1)  # 100 ms timeout
+        delivered = []
+
+        # m2 depends on m1, but m1 never arrives
+        m2 = self._make_msg("m2", sender_id=1, vector_clock={"1": 2})
+        r.try_deliver(m2, delivered.append)
+        self.assertEqual(len(delivered), 0)
+
+        # Wait for timeout to expire
+        time.sleep(0.15)
+
+        # Trigger a flush by delivering any new message
+        m3 = self._make_msg("m3", sender_id=2, vector_clock={"2": 1})
+        r.try_deliver(m3, delivered.append)
+
+        # Both should be delivered now — m2 via timeout, m3 normally
+        self.assertEqual(len(delivered), 2)
+        self.assertEqual(r.get_buffer_size(), 0)
+
+    def test_buffer_timeout_not_triggered_early(self):
+        """Messages should NOT be force-delivered before the timeout."""
+        r = MessageReorderer(buffer_timeout=5.0)  # long timeout
+        delivered = []
+
+        m2 = self._make_msg("m2", sender_id=1, vector_clock={"1": 2})
+        r.try_deliver(m2, delivered.append)
+        self.assertEqual(len(delivered), 0)
+
+        # Trigger flush immediately — timeout hasn't expired
+        m3 = self._make_msg("m3", sender_id=2, vector_clock={"2": 1})
+        r.try_deliver(m3, delivered.append)
+
+        # Only m3 should deliver, m2 still buffered
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0]["id"], "m3")
+        self.assertEqual(r.get_buffer_size(), 1)
+
+    def test_custom_buffer_timeout(self):
+        """Constructor should accept a custom buffer timeout value."""
+        r = MessageReorderer(buffer_timeout=30.0)
+        self.assertEqual(r._buffer_timeout, 30.0)
+
+    def test_default_buffer_timeout(self):
+        """Default buffer timeout should be BUFFER_TIMEOUT class constant."""
+        r = MessageReorderer()
+        self.assertEqual(r._buffer_timeout, MessageReorderer.BUFFER_TIMEOUT)
+
+
 if __name__ == "__main__":
     unittest.main()
