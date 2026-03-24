@@ -1,11 +1,77 @@
 // HiveChat - Protocol Buffer Definitions
-// Compile with: python -m grpc_tools.protoc -I proto --python_out=. --grpc_python_out=. proto/hivechat.proto
+// Compile with:
+//   python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/hivechat.proto
 
 syntax = "proto3";
 
 package hivechat;
 
-// TODO: Define services and messages
-// - MessagingService (SendMessage, GetMessages)
-// - RaftService (RequestVote, AppendEntries)
-// - SyncService (SyncTime, SyncMessages)
+// ─────────────────────────────────────────────
+// Shared message types
+// ─────────────────────────────────────────────
+
+message ChatMessage {
+  string message_id   = 1;
+  string sender       = 2;
+  string receiver     = 3;
+  string content      = 4;
+  double timestamp    = 5;
+  string origin_node  = 6;
+}
+
+message StatusResponse {
+  bool   success      = 1;
+  string status       = 2;
+  string message_id   = 3;
+  string node_id      = 4;
+}
+
+// ─────────────────────────────────────────────
+// MessagingService – client ↔ node
+// ─────────────────────────────────────────────
+
+message SendMessageRequest {
+  ChatMessage message = 1;
+}
+
+message GetMessagesRequest {
+  string node_id = 1;    // which node to pull from
+}
+
+message GetMessagesResponse {
+  repeated ChatMessage messages = 1;
+}
+
+service MessagingService {
+  // Client sends a new chat message to a node
+  rpc SendMessage (SendMessageRequest) returns (StatusResponse);
+
+  // Recovering node pulls all stored messages from a peer
+  rpc GetMessages (GetMessagesRequest) returns (GetMessagesResponse);
+}
+
+// ─────────────────────────────────────────────
+// FaultService – node ↔ node (fault tolerance)
+// ─────────────────────────────────────────────
+
+message HeartbeatRequest {
+  string sender_node_id = 1;
+}
+
+message HeartbeatResponse {
+  bool   alive   = 1;
+  string node_id = 2;
+}
+
+message ReplicateRequest {
+  ChatMessage message       = 1;
+  string      source_node_id = 2;
+}
+
+service FaultService {
+  // Liveness probe between nodes
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Primary node pushes a replica to a peer
+  rpc Replicate (ReplicateRequest) returns (StatusResponse);
+}
