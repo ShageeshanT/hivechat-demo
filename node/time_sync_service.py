@@ -62,10 +62,10 @@ def start_sync_server(node_id: int, port: int) -> grpc.Server:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     servicer = TimeSyncServicer(node_id)
     hivechat_pb2_grpc.add_TimeSyncServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f'[::]:{port}')
+    actual_port = server.add_insecure_port(f'127.0.0.1:{port}')
     server.start()
-    print(f"[TimeSyncService] Node {node_id}: server listening on port {port}")
-    return server
+    print(f"[TimeSyncService] Node {node_id}: server listening on port {actual_port}")
+    return server, actual_port
 
 
 def sync_once(target_addr: str, node_id: int) -> dict:
