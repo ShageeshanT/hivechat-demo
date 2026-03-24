@@ -248,11 +248,14 @@ class MessageReorderer:
         # callback_fn is called for each message in causal order.
     """
 
-    def __init__(self):
+    BUFFER_TIMEOUT: float = 10.0  # seconds before a buffered message is force-delivered
+
+    def __init__(self, buffer_timeout: float = None):
         self._delivered: dict[int, int] = {}   # node_id -> highest delivered seq
         self._delivered_ids: set[str]   = set()
         self._buffer: list[dict]        = []
         self._lock = threading.Lock()
+        self._buffer_timeout = buffer_timeout or self.BUFFER_TIMEOUT
 
     def try_deliver(self, message: dict, on_deliver) -> None:
         """Attempt to deliver a message, buffering it if dependencies are unmet.
@@ -267,17 +270,24 @@ class MessageReorderer:
         with self._lock:
             if message["id"] in self._delivered_ids:
                 return  # duplicate, skip
+            message["_buffered_at"] = time.time()
             self._buffer.append(message)
             self._flush(on_deliver)
 
     def _flush(self, on_deliver) -> None:
-        """Release all buffered messages whose causal dependencies are met."""
+        """Release all buffered messages whose causal dependencies are met,
+        or that have exceeded the buffer timeout."""
+        now = time.time()
         changed = True
         while changed:
             changed = False
             still_buffered = []
             for msg in self._buffer:
-                if self._can_deliver(msg):
+                timed_out = (now - msg.get("_buffered_at", now)) >= self._buffer_timeout
+                if self._can_deliver(msg) or timed_out:
+                    if timed_out:
+                        print(f"[MessageReorderer] WARNING: force-delivering "
+                              f"message {msg['id']} after {self._buffer_timeout}s timeout")
                     on_deliver(msg)
                     self._mark_delivered(msg)
                     changed = True
