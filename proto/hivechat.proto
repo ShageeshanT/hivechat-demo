@@ -5,7 +5,27 @@ syntax = "proto3";
 
 package hivechat;
 
-// TODO: Define services and messages
+// ── Time Synchronization (Shagee - IT24103322) ─────────────────────────
+
+// NTP-style time sync request sent by a node to the reference (leader).
+message TimeSyncRequest {
+  int32  node_id          = 1;  // ID of the requesting node
+  double client_send_time = 2;  // client's local time when request was sent
+}
+
+// Response from the reference node with its own timestamp.
+message TimeSyncResponse {
+  double client_send_time = 1;  // echoed back so client can compute RTT
+  double server_time      = 2;  // reference node's local time
+  int32  server_node_id   = 3;  // ID of the reference node
+}
+
+// Service for clock offset estimation between nodes.
+service TimeSyncService {
+  // Single round-trip time sync exchange (like NTP).
+  rpc GetTime (TimeSyncRequest) returns (TimeSyncResponse);
+}
+
+// TODO: Define remaining services and messages
 // - MessagingService (SendMessage, GetMessages)
 // - RaftService (RequestVote, AppendEntries)
-// - SyncService (SyncTime, SyncMessages)

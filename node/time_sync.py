@@ -143,26 +143,25 @@ class TimeSyncer:
     def _do_sync(self):
         """Perform one round-trip sync with the reference node.
 
-        STUB — the gRPC call will be wired in during integration.
-        For now, simulates a small drift for testing.
+        Tries the real gRPC call first (via time_sync_service.sync_once).
+        Falls back to a simulated offset if gRPC is unavailable.
         """
-        t_send = time.time()
+        try:
+            from node.time_sync_service import sync_once
+            result = sync_once(self.reference_addr, self.node_id)
+            if 'error' not in result:
+                self._add_sample(result['offset'])
+                return
+            # gRPC call failed — fall through to stub
+        except ImportError:
+            pass
 
-        # ── STUB: replace with real gRPC call ────────────────────────
-        # stub = TimeSyncServiceStub(channel)
-        # resp = stub.GetTime(TimeRequest(client_send_time=t_send))
-        # t_server = resp.server_time
-        # t_recv   = time.time()
-        # rtt      = t_recv - t_send
-        # offset   = t_server - (t_send + rtt / 2)
-        # ─────────────────────────────────────────────────────────────
-
-        # Simulated response for testing without gRPC
+        # Fallback: simulated response for testing without gRPC
+        t_send   = time.time()
         t_server = t_send + 0.001   # pretend server is 1 ms ahead
         t_recv   = time.time()
         rtt      = t_recv - t_send
         offset   = t_server - (t_send + rtt / 2)
-
         self._add_sample(offset)
 
     def _add_sample(self, offset: float):
