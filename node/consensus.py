@@ -37,3 +37,33 @@ class NodeState(Enum):
     CANDIDATE = "CANDIDATE"
     LEADER = "LEADER"
 
+
+# Log Entry
+# Each entry records a client message alongside the leader's term when the
+# entry was created.  The term is critical for consistency checks.
+
+class LogEntry:
+    """
+    A single entry in the Raft replicated log.
+
+    Attributes:
+        term    (int): The leader's term when this entry was created.
+        message (str): The client message payload.
+    """
+
+    def __init__(self, term: int, message: str):
+        self.term = term
+        self.message = message
+
+    def to_dict(self) -> dict:
+        """Serialize to a plain dict (useful for tests and replication)."""
+        return {"term": self.term, "message": self.message}
+
+    def __repr__(self) -> str:
+        return f"LogEntry(term={self.term}, message={self.message!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, LogEntry):
+            return NotImplemented
+        return self.term == other.term and self.message == other.message
+
