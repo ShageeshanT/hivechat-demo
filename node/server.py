@@ -152,7 +152,7 @@ class HiveChatNode:
         # Persistent storage path for this node
         data_dir = PROJECT_ROOT / "node" / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-        store_path = str(data_dir / f"node{self.node_id}_messages.json")
+        store_path = str(data_dir / f"node{self.node_id}_messages.db")
 
         # ── Fault Tolerance Manager ───────────────────────────────────────
         self.fault_manager = FaultToleranceManager(
