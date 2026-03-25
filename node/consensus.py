@@ -399,3 +399,80 @@ class RaftNode:
                 leader_commit=self.commit_index,
             )
 
+    # LOG REPLICATION  (§5.3 of the Raft paper)
+    # HOW log replication works:
+    #   1. Client sends a message to the leader.
+    #   2. Leader appends it to its own log.
+    #   3. Leader sends AppendEntries RPCs to every follower with the new
+    #      entry (and possibly older ones the follower is missing).
+    #   4. Each follower validates the entry and appends it to its own log.
+    #   5. Once a MAJORITY of nodes (including the leader) have the entry,
+    #      the leader commits it and applies it to the state machine.
+    #
+    # RESPONSIBILITY: CONSENSUS handles steps 1-5.
+    #                 REPLICATION handles storage after commit (step 5).
+
+    def receive_client_message(self, message: str) -> bool:
+        """
+        Handle a client write request.
+
+        Only the LEADER may accept client writes.  Followers and candidates
+        must reject them (the client should retry on the leader).
+
+        Args:
+            message: The client's message payload (a string).
+
+        Returns:
+            True  if the message was committed (majority acknowledged).
+            False if the write was rejected or could not be committed.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: Centralizing writes through the leader ensures a single
+             serialization point — all nodes see the same log order.
+        """
+        # Guard: only active leaders accept writes
+        if not self.active:
+            return False
+        if self.state != NodeState.LEADER:
+            return False
+
+        # Step 1: Append to leader's own log
+        entry = LogEntry(term=self.current_term, message=message)
+        self.log.append(entry)
+
+        # Step 2: Replicate to followers
+        self.replicate_log()
+
+        # Step 3: Try to commit
+        self.commit_entries()
+
+        # Return True if the new entry actually got committed.
+        return self.commit_index >= len(self.log) - 1
+
+    def replicate_log(self) -> None:
+        """
+        Send AppendEntries RPCs to all followers with any log entries
+        they are missing.
+
+        For each peer, we send entries starting from ``next_index[peer]``
+        up to the end of our log.  If a peer rejects (log mismatch), we
+        decrement ``next_index`` and retry — this is the standard Raft
+        log backtracking mechanism.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: The leader must replicate every entry to every follower so
+             the cluster maintains a consistent, ordered log.
+        """
+        if self.state != NodeState.LEADER:
+            return
+
+        for peer in self.peers:
+            # Skip unreachable nodes
+            if not peer.active:
+                continue
+            if peer.node_id in self.partitioned_from:
+                continue
+            if self.node_id in peer.partitioned_from:
+                continue
+
+            self._send_append_entries_to_peer(peer)
