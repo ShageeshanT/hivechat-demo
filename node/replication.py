@@ -326,19 +326,24 @@ class ReplicationManager:
         if self._is_duplicate(message["id"]):
             return True  # Already have it, acknowledge anyway
 
-        # Merge the incoming vector clock with ours
-        updated_clock = self.vector_clock.update(message["vector_clock"])
-        message["vector_clock"] = updated_clock
         message["status"] = "committed"  # We trust the sender already achieved quorum
 
         # Update Lamport clock from the incoming message if TimeSyncer is available
         if self.time_syncer and "lamport_time" in message:
             self.time_syncer.lamport.update(message["lamport_time"])
 
-        # Route through MessageReorderer for causal delivery if available
+        # Route through MessageReorderer for causal delivery if available.
+        # We preserve the original vector_clock for the reorderer's causal
+        # check, then merge into our own clock after delivery.
         if self.reorderer:
-            self.reorderer.try_deliver(message, self.store.save)
+            def _deliver(msg):
+                updated_clock = self.vector_clock.update(msg["vector_clock"])
+                msg["vector_clock"] = updated_clock
+                self.store.save(msg)
+            self.reorderer.try_deliver(message, _deliver)
         else:
+            updated_clock = self.vector_clock.update(message["vector_clock"])
+            message["vector_clock"] = updated_clock
             self.store.save(message)
 
         print(f"[Replication] Received replica for msg {message['id']}")
