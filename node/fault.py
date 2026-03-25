@@ -2,7 +2,7 @@
 HiveChat – Fault Tolerance Module
 ==================================
 Responsibilities (Member 2 – Sihan, IT24103532):
-  1. Persistent message store  – Atomic JSON-backed, dedup by message_id
+  1. Persistent message store  – SQLite-backed, dedup by message_id
   2. Failure detector          – Parallel heartbeat loop with latency tracking
   3. Pending replication queue – retry failed replications when peer recovers
   4. FaultToleranceManager     – orchestrates all three sub-systems and exposes
@@ -11,16 +11,27 @@ Responsibilities (Member 2 – Sihan, IT24103532):
 
 import json
 import os
+import sqlite3
 import threading
 import time
 import uuid
+import logging
+import contextlib
 from concurrent import futures
 from typing import Callable, Dict, List, Optional
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Type aliases
-# ─────────────────────────────────────────────────────────────────────────────
+# ── logger setup ─────────────────────────────────────────────────────────────
+
+logger = logging.getLogger("HiveChatFault")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("[%(levelname)s] [%(name)s] %(message)s"))
+    logger.addHandler(ch)
+
+
+# ── Type aliases ─────────────────────────────────────────────────────────────
 
 Message             = Dict[str, object]
 HeartbeatFunction   = Callable[[str], bool]
@@ -35,80 +46,94 @@ FetchMessagesFunction = Callable[[str], List[Message]]
 class PersistentMessageStore:
     """
     Local persistent store for fault tolerance.
-    Stores messages in a JSON file; prevents duplicates via message_id.
-    Thread-safe via a single lock.
+    Uses SQLite for performance and reliability (atomic ACID).
     """
 
-    def __init__(self, file_path: str):
-        self.file_path = file_path
+    def __init__(self, db_path: str):
+        self.db_path = db_path
         self.lock = threading.Lock()
 
-        directory = os.path.dirname(file_path)
+        directory = os.path.dirname(db_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
 
-        if not os.path.exists(self.file_path):
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump([], f)
-
-    # ── internal helpers ──────────────────────────────────────────────────
-
-    def _read_all(self) -> List[Message]:
-        with open(self.file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-
-    def _write_all(self, messages: List[Message]) -> None:
-        """Write to a temporary file and rename to prevent data loss on crash."""
-        temp_file = f"{self.file_path}.tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump(messages, f, indent=2)
-        os.replace(temp_file, self.file_path)
-
-    # ── public API ────────────────────────────────────────────────────────
+        # ensure table exists
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS messages (
+                        message_id TEXT PRIMARY KEY,
+                        sender TEXT,
+                        receiver TEXT,
+                        content TEXT,
+                        timestamp REAL,
+                        origin_node TEXT
+                    )
+                """)
 
     def save_message(self, message: Message) -> bool:
         """
         Persist a message only if its message_id has not been seen before.
         Returns True if inserted, False if duplicate.
         """
-        with self.lock:
-            messages = self._read_all()
-            existing_ids = {m["message_id"] for m in messages}
-            if message["message_id"] in existing_ids:
-                return False
-            messages.append(message)
-            self._write_all(messages)
-            return True
+        try:
+            with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO messages VALUES (?,?,?,?,?,?)",
+                        (
+                            message["message_id"],
+                            message["sender"],
+                            message["receiver"],
+                            message["content"],
+                            message["timestamp"],
+                            message["origin_node"]
+                        )
+                    )
+                return True
+        except sqlite3.IntegrityError:
+            return False
 
     def merge_messages(self, incoming: List[Message]) -> int:
         """
         Merge messages fetched from a peer into the local store.
         Returns the number of newly inserted messages.
         """
-        with self.lock:
-            messages = self._read_all()
-            existing_ids = {m["message_id"] for m in messages}
-            added = 0
-            for msg in incoming:
-                if msg["message_id"] not in existing_ids:
-                    messages.append(msg)
-                    existing_ids.add(msg["message_id"])
-                    added += 1
-            self._write_all(messages)
-            return added
+        added = 0
+        with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                for msg in incoming:
+                    try:
+                        conn.execute(
+                            "INSERT INTO messages VALUES (?,?,?,?,?,?)",
+                            (
+                                msg["message_id"],
+                                msg["sender"],
+                                msg["receiver"],
+                                msg["content"],
+                                msg["timestamp"],
+                                msg["origin_node"]
+                            )
+                        )
+                        added += 1
+                    except sqlite3.IntegrityError:
+                        continue
+        return added
 
     def get_all_messages(self) -> List[Message]:
-        with self.lock:
-            return self._read_all()
+        with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM messages")
+            return [dict(row) for row in cursor.fetchall()]
 
     def count(self) -> int:
-        with self.lock:
-            return len(self._read_all())
+        with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM messages")
+            return cursor.fetchone()[0]
 
     def size_bytes(self) -> int:
-        """Return raw file size in bytes (useful for storage-overhead metrics)."""
         try:
-            return os.path.getsize(self.file_path)
+            return os.path.getsize(self.db_path)
         except OSError:
             return 0
 
@@ -122,12 +147,7 @@ class FailureDetector:
     Periodically pings every peer via heartbeat_fn.
 
     A peer is declared DEAD only after it misses `threshold` consecutive
-    heartbeats (default = 3). This prevents false positives from transient
-    network hiccups and is the standard phi-accrual / threshold approach.
-
-    When a previously dead peer becomes alive again the detector fires the
-    optional `on_peer_recovered` callback so the manager can drain its
-    pending replication queue for that peer.
+    heartbeats (default = 3).
     """
 
     def __init__(
@@ -144,18 +164,13 @@ class FailureDetector:
         self.threshold = threshold
         self.on_peer_recovered = on_peer_recovered
 
-        # track consecutive misses  {peer: missed_count}
         self._missed: Dict[str, int] = {p: 0 for p in peers}
-        # alive status after applying threshold
         self._status: Dict[str, bool] = {p: False for p in peers}
-        # track response times (latency)
         self._latencies: Dict[str, float] = {p: 0.0 for p in peers}
 
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
-
-    # ── lifecycle ─────────────────────────────────────────────────────────
 
     def start(self) -> None:
         if self._running:
@@ -166,13 +181,10 @@ class FailureDetector:
 
     def stop(self) -> None:
         self._running = False
-        if self._thread:
+        if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
 
-    # ── parallel pings ────────────────────────────────────────────────────
-
     def _ping_peer(self, peer: str) -> None:
-        """Ping a single peer, update status and track latency."""
         start_time = time.time()
         try:
             responded = self.heartbeat_fn(peer)
@@ -199,17 +211,10 @@ class FailureDetector:
                     self._latencies[peer] = 0.0
 
     def _monitor_loop(self) -> None:
-        """
-        Main monitoring loop. Uses a ThreadPoolExecutor to ping all peers
-        simultaneously to avoid serial delays.
-        """
         with futures.ThreadPoolExecutor(max_workers=len(self.peers) or 1) as executor:
             while self._running:
-                # Issue all pings in parallel
                 list(executor.map(self._ping_peer, self.peers))
                 time.sleep(self.interval_seconds)
-
-    # ── queries ───────────────────────────────────────────────────────────
 
     def get_status(self) -> Dict[str, bool]:
         with self._lock:
@@ -237,13 +242,6 @@ class FailureDetector:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PendingReplicationQueue:
-    """
-    When a replication attempt to a peer fails, the message is queued here.
-    When the peer is declared alive again the queue is drained automatically.
-
-    Structure:  { peer_address: [message, ...] }
-    """
-
     def __init__(self):
         self._queue: Dict[str, List[Message]] = {}
         self._lock = threading.Lock()
@@ -253,7 +251,6 @@ class PendingReplicationQueue:
             self._queue.setdefault(peer, []).append(message)
 
     def drain(self, peer: str) -> List[Message]:
-        """Return and remove all pending messages for a peer."""
         with self._lock:
             return self._queue.pop(peer, [])
 
@@ -271,17 +268,6 @@ class PendingReplicationQueue:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FaultToleranceManager:
-    """
-    Main fault-tolerance orchestrator.
-
-    Covers all five requirements for Member 2:
-      ✔ Message redundancy    – replication_factor copies stored across cluster
-      ✔ Failure detection     – FailureDetector with parallel pings + threshold
-      ✔ Automatic failover    – skip dead peers; client stays connected via list
-      ✔ Node recovery         – recover_from_peers() on rejoin + queue drain
-      ✔ Redundancy metrics    – storage_overhead, per-peer success, and latency
-    """
-
     def __init__(
         self,
         node_id: str,
@@ -289,7 +275,7 @@ class FaultToleranceManager:
         heartbeat_fn: HeartbeatFunction,
         replicate_fn: ReplicateFunction,
         fetch_messages_fn: FetchMessagesFunction,
-        store_path: str = "node/data/messages.json",
+        store_path: str = "node/data/messages.db",
         replication_factor: int = 2,
         heartbeat_interval: float = 3.0,
         missed_threshold: int = 3,
@@ -297,6 +283,11 @@ class FaultToleranceManager:
         self.node_id = node_id
         self.peers = peers
         self.replication_factor = max(1, replication_factor)
+        
+        # ensure .db extension if passed as .json
+        if store_path.endswith(".json"):
+            store_path = store_path.replace(".json", ".db")
+            
         self.store = PersistentMessageStore(store_path)
         self._start_time = time.time()
 
@@ -314,7 +305,6 @@ class FaultToleranceManager:
             on_peer_recovered=self._on_peer_recovered,
         )
 
-        # Per-peer replication success / failure counters
         self._peer_successes: Dict[str, int] = {p: 0 for p in peers}
         self._peer_failures:  Dict[str, int] = {p: 0 for p in peers}
         self._stats_lock = threading.Lock()
@@ -329,20 +319,14 @@ class FaultToleranceManager:
             "pending_retried":                0,
         }
 
-    # ── lifecycle ─────────────────────────────────────────────────────────
-
     def start(self) -> None:
-        """Start failure detector and attempt recovery from peers."""
         self.detector.start()
-        # Small delay so that peers have a chance to start as well
         time.sleep(1.0)
         recovered = self.recover_from_peers()
         self.metrics["recovered_messages"] += recovered
 
     def stop(self) -> None:
         self.detector.stop()
-
-    # ── message construction ──────────────────────────────────────────────
 
     def build_message(
         self,
@@ -351,7 +335,6 @@ class FaultToleranceManager:
         content: str,
         timestamp: Optional[float] = None,
     ) -> Message:
-        """Build a normalised message dict with a globally-unique ID."""
         return {
             "message_id":   str(uuid.uuid4()),
             "sender":       sender,
@@ -361,17 +344,8 @@ class FaultToleranceManager:
             "origin_node":  self.node_id,
         }
 
-    # ── inbound handlers ──────────────────────────────────────────────────
-
     def handle_client_message(self, message: Message) -> Dict[str, object]:
-        """
-        Called when a client submits a new message to this node.
-        1. Store locally (dedup).
-        2. Replicate to live peers up to (replication_factor - 1) copies.
-        3. Queue failed replications for later retry.
-        """
         self.metrics["messages_received_from_clients"] += 1
-
         inserted = self.store.save_message(message)
         if inserted:
             self.metrics["messages_stored_locally"] += 1
@@ -379,7 +353,6 @@ class FaultToleranceManager:
             self.metrics["duplicates_ignored"] += 1
 
         replicated_count = self._replicate_to_live_peers(message)
-
         return {
             "status":        "stored",
             "node_id":       self.node_id,
@@ -388,10 +361,6 @@ class FaultToleranceManager:
         }
 
     def handle_replica_message(self, message: Message) -> Dict[str, object]:
-        """
-        Called when another node pushes a replica to this node.
-        Simply stores locally (dedup guard already in place).
-        """
         inserted = self.store.save_message(message)
         if inserted:
             self.metrics["messages_stored_locally"] += 1
@@ -406,8 +375,6 @@ class FaultToleranceManager:
             "message_id": message["message_id"],
         }
 
-    # ── replication ───────────────────────────────────────────────────────
-
     def _replicate_to_live_peers(self, message: Message) -> int:
         live_peers   = self.detector.get_live_peers()
         needed       = max(0, self.replication_factor - 1)
@@ -420,7 +387,6 @@ class FaultToleranceManager:
             if ok:
                 successful += 1
 
-        # Queue for dead peers so they get it when they come back
         dead_peers = [p for p in self.peers if not self.detector.is_alive(p)]
         for peer in dead_peers:
             self.pending_queue.enqueue(peer, message)
@@ -444,13 +410,7 @@ class FaultToleranceManager:
                 self.metrics["replication_failures"] += 1
             return False
 
-    # ── recovery ──────────────────────────────────────────────────────────
-
     def recover_from_peers(self) -> int:
-        """
-        On node rejoin: pull messages from all reachable peers and merge
-        any that are missing locally.
-        """
         recovered = 0
         for peer in self.peers:
             try:
@@ -462,10 +422,6 @@ class FaultToleranceManager:
         return recovered
 
     def _on_peer_recovered(self, peer: str) -> None:
-        """
-        Callback fired by FailureDetector when a dead peer comes back.
-        Drains the pending queue for that peer.
-        """
         pending = self.pending_queue.drain(peer)
         retried = 0
         for message in pending:
@@ -473,12 +429,7 @@ class FaultToleranceManager:
                 retried += 1
         if retried:
             self.metrics["pending_retried"] += retried
-            print(
-                f"[FaultTolerance] Peer {peer} recovered -> "
-                f"retried {retried} queued message(s)."
-            )
-
-    # ── queries / export ──────────────────────────────────────────────────
+            logger.info(f"Peer {peer} recovered -> retried {retried} queued message(s).")
 
     def export_messages(self) -> List[Message]:
         return self.store.get_all_messages()
@@ -491,7 +442,6 @@ class FaultToleranceManager:
         storage_bytes = self.store.size_bytes()
         uptime        = round(time.time() - self._start_time, 1)
 
-        # Per-peer replication success rate
         with self._stats_lock:
             per_peer = {}
             for peer in self.peers:
@@ -510,7 +460,6 @@ class FaultToleranceManager:
             "local_message_count":            local_count,
             "storage_bytes":                  storage_bytes,
             "replication_factor":             self.replication_factor,
-            # overhead: if RF=2, total bytes stored cluster-wide ≈ 2× single node
             "estimated_storage_overhead_multiplier": self.replication_factor,
             "pending_queue_total":            self.pending_queue.total_pending(),
             "peer_latencies_seconds":         self.detector.get_latencies(),
