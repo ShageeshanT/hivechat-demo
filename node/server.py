@@ -6,7 +6,7 @@ Entry point for starting a distributed messaging node.
 import argparse
 import logging
 
-from node.time_sync import TimeSyncer
+from node.time_sync import TimeSyncer, MessageReorderer
 from node.time_sync_service import start_sync_server
 
 logging.basicConfig(
@@ -52,18 +52,20 @@ def main():
     time_syncer = TimeSyncer(node_id=args.node_id, reference_addr=reference_addr)
     time_syncer.start()
 
+    # Create the message reorderer for causal delivery
+    reorderer = MessageReorderer()
+
     logger.info("Time sync initialized (sync_port=%d, reference=%s)",
                 sync_port, reference_addr or "none")
 
     # TODO: Initialize remaining components
     # 2. Consensus (Raft)
-    # 3. Data Replication
+    # 3. Data Replication — pass time_syncer and reorderer to ReplicationManager
     # 4. Fault Tolerance
 
     logger.info("Node %d is ready.", args.node_id)
 
-    # Return syncer so other modules can access it
-    return time_syncer
+    return time_syncer, reorderer
 
 
 if __name__ == "__main__":
