@@ -321,12 +321,21 @@ class FaultToleranceManager:
 
     def start(self) -> None:
         self.detector.start()
+        
+        # Start persistent retry thread for transient failures
+        self._retry_running = True
+        self._retry_thread = threading.Thread(target=self._retry_loop, daemon=True)
+        self._retry_thread.start()
+        
         time.sleep(1.0)
         recovered = self.recover_from_peers()
         self.metrics["recovered_messages"] += recovered
 
     def stop(self) -> None:
         self.detector.stop()
+        self._retry_running = False
+        if getattr(self, "_retry_thread", None) and self._retry_thread.is_alive():
+            self._retry_thread.join(timeout=2.0)
 
     def build_message(
         self,
@@ -386,6 +395,9 @@ class FaultToleranceManager:
             ok = self._try_replicate(peer, message)
             if ok:
                 successful += 1
+            else:
+                # Transient network error while peer is technically marked live
+                self.pending_queue.enqueue(peer, message)
 
         dead_peers = [p for p in self.peers if not self.detector.is_alive(p)]
         for peer in dead_peers:
@@ -420,6 +432,26 @@ class FaultToleranceManager:
             except Exception:
                 continue
         return recovered
+
+    def _retry_loop(self) -> None:
+        """Background thread to actively drain the queue for live peers."""
+        while getattr(self, "_retry_running", False):
+            live_peers = self.detector.get_live_peers()
+            for peer in live_peers:
+                if self.pending_queue.pending_count(peer) > 0:
+                    pending = self.pending_queue.drain(peer)
+                    retried = 0
+                    for message in pending:
+                        if self._try_replicate(peer, message):
+                            retried += 1
+                        else:
+                            self.pending_queue.enqueue(peer, message) # Still failed, re-queue
+                    
+                    if retried:
+                        with self._stats_lock:
+                            self.metrics["pending_retried"] += retried
+                        logger.info(f"Background Sync: Peer {peer} received {retried} queued message(s).")
+            time.sleep(5.0)
 
     def _on_peer_recovered(self, peer: str) -> None:
         pending = self.pending_queue.drain(peer)
