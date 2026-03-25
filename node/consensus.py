@@ -30,7 +30,6 @@ from typing import Optional
 #   FOLLOWER  – Default state. Passively accepts RPCs from leaders/candidates.
 #   CANDIDATE – Actively trying to become leader (started an election).
 #   LEADER    – Coordinates the cluster; the ONLY node that accepts client writes.
-
 class NodeState(Enum):
     """Possible states of a Raft node."""
     FOLLOWER = "FOLLOWER"
@@ -41,7 +40,6 @@ class NodeState(Enum):
 # Log Entry
 # Each entry records a client message alongside the leader's term when the
 # entry was created.  The term is critical for consistency checks.
-
 class LogEntry:
     """
     A single entry in the Raft replicated log.
@@ -69,7 +67,6 @@ class LogEntry:
 
 
 # RaftNode  –  The core consensus implementation
-
 class RaftNode:
     """
     Simplified Raft consensus node.
@@ -163,3 +160,35 @@ class RaftNode:
         # partitioned_from: Set of node IDs this node cannot communicate with.
         # WHY: Simulates network partitions in tests.
         self.partitioned_from: set[int] = set()
+
+    # PUBLIC INTERFACE  —  called by the REPLICATION module
+
+    def get_leader(self) -> int:
+        """
+        Return the node_id of the current leader, or -1 if unknown.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: The replication module needs to know who the leader is so it
+             can route client writes to the correct node.
+        """
+        return self.leader_id
+
+    def is_leader(self) -> bool:
+        """
+        Return True if THIS node is the current leader.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: Used by the replication layer to decide if this node should
+             accept client write requests.
+        """
+        return self.state == NodeState.LEADER
+
+    # HELPER / TESTING METHODS
+
+    def get_state(self) -> str:
+        """Return the current node state as a string (for testing/debugging)."""
+        return self.state.value
+
+    def get_log(self) -> list[dict]:
+        """Return the log as a list of dicts (for testing/debugging)."""
+        return [entry.to_dict() for entry in self.log]
