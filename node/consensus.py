@@ -192,3 +192,210 @@ class RaftNode:
     def get_log(self) -> list[dict]:
         """Return the log as a list of dicts (for testing/debugging)."""
         return [entry.to_dict() for entry in self.log]
+
+    # LEADER ELECTION  (§5.2 of the Raft paper)
+    # WHY leader election exists:
+    #   In a distributed system we need exactly ONE coordinator (the leader)
+    #   to serialize client writes and ensure all nodes see the same log.
+    #   Without a leader, concurrent writes could conflict.
+    #
+    # HOW it works:
+    #   1. A follower times out (hasn't heard from a leader).
+    #   2. It becomes a CANDIDATE, increments its term, votes for itself.
+    #   3. It sends RequestVote RPCs to every peer.
+    #   4. If it receives votes from a majority, it becomes LEADER.
+    #   5. If another node has already won this term, it steps down.
+
+    def start_election(self) -> bool:
+        """
+        Initiate a leader election on this node.
+
+        This method transitions the node to CANDIDATE, increments the term,
+        votes for itself, and solicits votes from all reachable peers.
+
+        Returns:
+            True  if this node won the election (became leader).
+            False if the election failed (did not get majority).
+
+        RESPONSIBILITY: CONSENSUS
+        """
+        # Guard: only active nodes can start elections
+        if not self.active:
+            return False
+
+        # Step 1: Transition to CANDIDATE
+        self.state = NodeState.CANDIDATE
+        self.current_term += 1
+        self.voted_for = self.node_id  # Vote for ourselves
+
+        # Track votes received; we already have our own vote.
+        votes_received: int = 1
+        total_nodes: int = len(self.peers) + 1  # peers + self
+        majority_needed: int = (total_nodes // 2) + 1
+
+        # Step 2: Determine our last log info for vote request
+        # WHY: Raft requires the candidate to share its last log entry so
+        #      voters can reject candidates with incomplete logs (§5.4.1).
+        last_log_index = len(self.log) - 1
+        last_log_term = self.log[last_log_index].term if self.log else 0
+
+        # Step 3: Request votes from all reachable peers
+        for peer in self.peers:
+            # Skip unreachable / crashed / partitioned nodes
+            if not peer.active:
+                continue
+            if peer.node_id in self.partitioned_from:
+                continue
+            if self.node_id in peer.partitioned_from:
+                continue
+
+            vote_granted = peer.request_vote(
+                candidate_id=self.node_id,
+                candidate_term=self.current_term,
+                last_log_index=last_log_index,
+                last_log_term=last_log_term,
+            )
+            if vote_granted:
+                votes_received += 1
+
+        # Step 4: Did we win?
+        # WHY: A candidate wins only with a STRICT MAJORITY.  This ensures
+        #      at most one leader per term because any two majorities must
+        #      overlap in at least one node.
+        if votes_received >= majority_needed:
+            self._become_leader()
+            return True
+        else:
+            # Election failed — revert to follower.
+            self.state = NodeState.FOLLOWER
+            return False
+
+    def request_vote(self, candidate_id: int, candidate_term: int,
+                     last_log_index: int, last_log_term: int) -> bool:
+        """
+        Handle a RequestVote RPC from a candidate.
+
+        This implements the Raft voting rules (§5.2, §5.4.1):
+          1. Reject if candidate_term < current_term.
+          2. Grant vote only if we haven't voted for someone else this term.
+          3. Grant vote only if candidate's log is at least as up-to-date
+             as ours (the "election restriction").
+
+        Args:
+            candidate_id:    Node ID of the candidate.
+            candidate_term:  The candidate's current term.
+            last_log_index:  Index of candidate's last log entry.
+            last_log_term:   Term of candidate's last log entry.
+
+        Returns:
+            True if vote is granted, False otherwise.
+
+        RESPONSIBILITY: CONSENSUS
+        """
+        # Guard: inactive nodes cannot vote
+        if not self.active:
+            return False
+
+        # Rule 1: Reject stale candidates
+        # WHY: A candidate in an older term is outdated and should not
+        #      become leader.
+        if candidate_term < self.current_term:
+            return False
+
+        # Update term if candidate has a newer term
+        # WHY: If we see a higher term, there must have been an election
+        #      we missed.  We step down to follower and update our term.
+        if candidate_term > self.current_term:
+            self.current_term = candidate_term
+            self.state = NodeState.FOLLOWER
+            self.voted_for = None
+            self.leader_id = -1
+
+        # Rule 2: Only one vote per term
+        # WHY: If we already voted for a different candidate this term,
+        #      we must not vote again to prevent split-brain.
+        if self.voted_for is not None and self.voted_for != candidate_id:
+            return False
+
+        # Rule 3: Election restriction (log completeness)
+        # WHY: We must not elect a leader that is MISSING committed entries.
+        #      The candidate's log must be at least as up-to-date as ours.
+        #      "Up-to-date" means:
+        #        - Last entry has a HIGHER term, OR
+        #        - Same term but log is at least as LONG.
+        my_last_log_term = self.log[-1].term if self.log else 0
+        my_last_log_index = len(self.log) - 1
+
+        candidate_log_ok = (
+            last_log_term > my_last_log_term or
+            (last_log_term == my_last_log_term and
+             last_log_index >= my_last_log_index)
+        )
+
+        if not candidate_log_ok:
+            return False
+
+        # Grant the vote
+        self.voted_for = candidate_id
+        return True
+
+    def _become_leader(self) -> None:
+        """
+        Transition this node to LEADER state.
+
+        Called when the node wins an election.  Initializes leader-only
+        volatile state (next_index, match_index) and immediately sends
+        empty heartbeats to all followers to establish authority.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: After winning, the leader must immediately assert itself so
+             followers know to stop their election timers.
+        """
+        self.state = NodeState.LEADER
+        self.leader_id = self.node_id
+
+        # Initialize leader-only state
+        # next_index[peer] = len(log) → optimistically assume peers are
+        #   up-to-date.  If not, we'll decrement on conflict.
+        # match_index[peer] = -1 → we haven't confirmed anything yet.
+        for peer in self.peers:
+            self.next_index[peer.node_id] = len(self.log)
+            self.match_index[peer.node_id] = -1
+
+        # Send initial heartbeat (empty AppendEntries)
+        # WHY: This prevents other nodes from timing out and starting
+        #      their own elections.
+        self._send_heartbeats()
+
+    def _send_heartbeats(self) -> None:
+        """
+        Send empty AppendEntries RPCs to all peers (heartbeat).
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: Heartbeats prevent followers from timing out and starting
+             unnecessary elections.  They also carry the leader's commit
+             index so followers can advance their own commit state.
+        """
+        for peer in self.peers:
+            if not peer.active:
+                continue
+            if peer.node_id in self.partitioned_from:
+                continue
+            if self.node_id in peer.partitioned_from:
+                continue
+
+            prev_log_index = self.next_index.get(peer.node_id, 0) - 1
+            prev_log_term = (
+                self.log[prev_log_index].term
+                if 0 <= prev_log_index < len(self.log) else 0
+            )
+
+            peer.append_entries(
+                leader_id=self.node_id,
+                term=self.current_term,
+                prev_log_index=prev_log_index,
+                prev_log_term=prev_log_term,
+                entries=[],  # Heartbeat — no entries
+                leader_commit=self.commit_index,
+            )
+
