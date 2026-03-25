@@ -222,6 +222,26 @@ class TimeSyncer:
         with self._lock:
             return len(self._samples)
 
+    def get_stats(self) -> dict:
+        """Return a snapshot of all sync metrics for monitoring.
+
+        Returns a dict with:
+            node_id, offset_ms, sample_count, reference_addr,
+            lamport_time, running, sync_interval, max_offset_ms
+        """
+        with self._lock:
+            return {
+                "node_id": self.node_id,
+                "offset_ms": round(self.offset * 1000, 3),
+                "sample_count": len(self._samples),
+                "samples_ms": [round(s * 1000, 3) for s in self._samples],
+                "reference_addr": self.reference_addr,
+                "lamport_time": self.lamport.get(),
+                "running": self._running,
+                "sync_interval": self.SYNC_INTERVAL,
+                "max_offset_ms": self.MAX_OFFSET_MS,
+            }
+
 
 # SECTION 3: Causal Message Reordering
 # Buffers messages that arrive before their causal dependencies and
@@ -343,3 +363,40 @@ class MessageReorderer:
         """Return the number of messages delivered so far."""
         with self._lock:
             return len(self._delivered_ids)
+
+    def get_stats(self) -> dict:
+        """Return a snapshot of reorderer metrics for monitoring.
+
+        Returns a dict with:
+            buffer_size, delivered_count, buffer_timeout,
+            buffered_msg_ids, delivered_per_node
+        """
+        with self._lock:
+            return {
+                "buffer_size": len(self._buffer),
+                "delivered_count": len(self._delivered_ids),
+                "buffer_timeout": self._buffer_timeout,
+                "buffered_msg_ids": [m["id"] for m in self._buffer],
+                "delivered_per_node": dict(self._delivered),
+            }
+
+
+def get_sync_stats(time_syncer: 'TimeSyncer',
+                   reorderer: 'MessageReorderer') -> dict:
+    """Aggregate stats from TimeSyncer and MessageReorderer into one report.
+
+    Useful for health checks, debugging, and admin dashboards.
+
+    Parameters
+    ----------
+    time_syncer : TimeSyncer
+    reorderer : MessageReorderer
+
+    Returns
+    -------
+    dict with keys 'time_sync' and 'reorderer'.
+    """
+    return {
+        "time_sync": time_syncer.get_stats(),
+        "reorderer": reorderer.get_stats(),
+    }
