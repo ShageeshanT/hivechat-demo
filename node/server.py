@@ -25,6 +25,9 @@ CURRENT_FILE = Path(__file__).resolve()
 PROJECT_ROOT = CURRENT_FILE.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
+PROTO_DIR = PROJECT_ROOT / "proto"
+if str(PROTO_DIR) not in sys.path:
+    sys.path.append(str(PROTO_DIR))
 
 # ── generated gRPC stubs ──────────────────────────────────────────────────────
 from proto import hivechat_pb2, hivechat_pb2_grpc
