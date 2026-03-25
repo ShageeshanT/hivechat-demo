@@ -9,9 +9,12 @@ Responsibilities:
 """
 
 import time
+import logging
 import threading
 import statistics
 from typing import Optional
+
+logger = logging.getLogger("hivechat.time_sync")
 
 
 # SECTION 1: Lamport Logical Clock
@@ -113,8 +116,8 @@ class TimeSyncer:
         self._running = True
         t = threading.Thread(target=self._sync_loop, daemon=True)
         t.start()
-        print(f"[TimeSync] Node {self.node_id}: sync thread started "
-              f"(interval={self.SYNC_INTERVAL}s, samples={self.SAMPLE_COUNT})")
+        logger.info("Node %d: sync thread started (interval=%.1fs, samples=%d)",
+                    self.node_id, self.SYNC_INTERVAL, self.SAMPLE_COUNT)
 
     def stop(self):
         """Stop the background sync thread."""
@@ -129,7 +132,7 @@ class TimeSyncer:
             self.reference_addr = addr
             self._samples.clear()
             self.offset = 0.0
-        print(f"[TimeSync] Node {self.node_id}: reference changed to {addr}")
+        logger.info("Node %d: reference changed to %s", self.node_id, addr)
 
     # ── Core Sync Logic ──────────────────────────────────────────────────
 
@@ -173,8 +176,8 @@ class TimeSyncer:
             self.offset = statistics.median(self._samples)
 
         if abs(self.offset) * 1000 > self.MAX_OFFSET_MS:
-            print(f"[TimeSync] WARNING: large clock offset: "
-                  f"{self.offset * 1000:.1f} ms")
+            logger.warning("Node %d: large clock offset: %.1f ms",
+                           self.node_id, self.offset * 1000)
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -286,8 +289,8 @@ class MessageReorderer:
                 timed_out = (now - msg.get("_buffered_at", now)) >= self._buffer_timeout
                 if self._can_deliver(msg) or timed_out:
                     if timed_out:
-                        print(f"[MessageReorderer] WARNING: force-delivering "
-                              f"message {msg['id']} after {self._buffer_timeout}s timeout")
+                        logger.warning("force-delivering message %s after %.1fs timeout",
+                                       msg["id"], self._buffer_timeout)
                     on_deliver(msg)
                     self._mark_delivered(msg)
                     changed = True

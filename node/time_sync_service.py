@@ -9,8 +9,11 @@ for NTP-style clock offset estimation between nodes.
 import sys
 import os
 import time
+import logging
 import grpc
 from concurrent import futures
+
+logger = logging.getLogger("hivechat.time_sync_service")
 
 # Add proto directory to path so generated stubs can be imported
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'proto'))
@@ -64,7 +67,7 @@ def start_sync_server(node_id: int, port: int) -> grpc.Server:
     hivechat_pb2_grpc.add_TimeSyncServiceServicer_to_server(servicer, server)
     actual_port = server.add_insecure_port(f'127.0.0.1:{port}')
     server.start()
-    print(f"[TimeSyncService] Node {node_id}: server listening on port {actual_port}")
+    logger.info("Node %d: server listening on port %d", node_id, actual_port)
     return server, actual_port
 
 
