@@ -113,31 +113,46 @@ class HiveChatClient:
 
     def receive_messages(self) -> list:
         """
-        Pull all messages from the primary server.
+        Pull all messages from the cluster with automatic failover.
         Useful for a simple inbox view.
         """
-        server = self.servers[self._current_index]
-        try:
-            with grpc.insecure_channel(server) as channel:
-                stub    = hivechat_pb2_grpc.MessagingServiceStub(channel)
-                request = hivechat_pb2.GetMessagesRequest(node_id="client")
-                resp    = stub.GetMessages(request, timeout=RECEIVE_TIMEOUT)
-                messages = [
-                    {
-                        "message_id":  m.message_id,
-                        "sender":      m.sender,
-                        "receiver":    m.receiver,
-                        "content":     m.content,
-                        "timestamp":   m.timestamp,
-                        "origin_node": m.origin_node,
-                    }
-                    for m in resp.messages
-                    if m.receiver == self.username
-                ]
-                return messages
-        except Exception as exc:
-            print(f"[HiveChat Client] Inbox fetch failed: {exc}")
-            return []
+        last_error = None
+        num_servers = len(self.servers)
+
+        for attempt in range(num_servers):
+            idx    = (self._current_index + attempt) % num_servers
+            server = self.servers[idx]
+            try:
+                with grpc.insecure_channel(server) as channel:
+                    stub    = hivechat_pb2_grpc.MessagingServiceStub(channel)
+                    request = hivechat_pb2.GetMessagesRequest(node_id="client")
+                    resp    = stub.GetMessages(request, timeout=RECEIVE_TIMEOUT)
+                    messages = [
+                        {
+                            "message_id":  m.message_id,
+                            "sender":      m.sender,
+                            "receiver":    m.receiver,
+                            "content":     m.content,
+                            "timestamp":   m.timestamp,
+                            "origin_node": m.origin_node,
+                        }
+                        for m in resp.messages
+                        if m.receiver == self.username
+                    ]
+                    
+                    if attempt > 0:
+                        print(f"[FAILOVER] Inbox fetched from {server}")
+                        self._current_index = idx  # update active server
+                        
+                    return messages
+            except Exception as exc:
+                print(f"[FAILOVER] {server} (inbox) unavailable ({exc}). Trying next …")
+                last_error = exc
+                if attempt < num_servers - 1:
+                    time.sleep(RETRY_DELAY)
+
+        print(f"[HiveChat Client] Inbox fetch failed: All servers unavailable. Last error: {last_error}")
+        return []
 
     # ── interactive loop ──────────────────────────────────────────────────
 
