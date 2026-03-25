@@ -98,12 +98,17 @@ class TestPersistentStore(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.managers = []
 
     def tearDown(self):
+        for m in self.managers:
+            m.stop()
         self.tmp.cleanup()
 
     def _mgr(self, **kw):
-        return make_manager(self.tmp.name, **kw)
+        m = make_manager(self.tmp.name, **kw)
+        self.managers.append(m)
+        return m
 
     def test_local_store_and_replication(self):
         """Message is stored locally and replicated to the one live peer."""
@@ -149,12 +154,20 @@ class TestMetrics(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.managers = []
 
     def tearDown(self):
+        for m in self.managers:
+            m.stop()
         self.tmp.cleanup()
 
+    def _mgr(self, **kw):
+        m = make_manager(self.tmp.name, **kw)
+        self.managers.append(m)
+        return m
+
     def test_metrics_keys_present(self):
-        mgr     = make_manager(self.tmp.name)
+        mgr     = self._mgr()
         metrics = mgr.get_metrics()
 
         for key in (
@@ -167,21 +180,20 @@ class TestMetrics(unittest.TestCase):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
     def test_uptime_is_positive(self):
-        mgr = make_manager(self.tmp.name)
+        mgr = self._mgr()
         time.sleep(0.05)
         self.assertGreater(mgr.get_metrics()["uptime_seconds"], 0)
 
     def test_storage_bytes_nonzero_after_message(self):
         """Storage file size should be > 0 once a message is stored."""
-        mgr = make_manager(self.tmp.name)
+        mgr = self._mgr()
         mgr.handle_client_message(mgr.build_message("A", "B", "test"))
         self.assertGreater(mgr.get_metrics()["storage_bytes"], 0)
 
     def test_per_peer_success_rate(self):
         """After a successful replication the success rate should be 1.0."""
         replica_calls = []
-        mgr = make_manager(
-            self.tmp.name,
+        mgr = self._mgr(
             heartbeat_map={"node2": True, "node3": False},
             replica_calls=replica_calls,
         )
@@ -198,17 +210,24 @@ class TestFailureDetector(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.managers = []
 
     def tearDown(self):
+        for m in self.managers:
+            m.stop()
         self.tmp.cleanup()
+
+    def _mgr(self, **kw):
+        m = make_manager(self.tmp.name, **kw)
+        self.managers.append(m)
+        return m
 
     def test_peer_stays_unknown_below_threshold(self):
         """
         Peer starts as False (default). If missed < threshold it remains False
         but is not yet toggled by the threshold logic run manually below.
         """
-        mgr = make_manager(
-            self.tmp.name,
+        mgr = self._mgr(
             heartbeat_map={"node2": False, "node3": False},
             missed_threshold=3,
         )
@@ -224,8 +243,7 @@ class TestFailureDetector(unittest.TestCase):
         After `threshold` consecutive misses the detector marks the peer DEAD.
         We simulate the internal state directly to avoid real threading.
         """
-        mgr = make_manager(
-            self.tmp.name,
+        mgr = self._mgr(
             heartbeat_map={"node2": False, "node3": False},
             missed_threshold=3,
         )
@@ -240,8 +258,7 @@ class TestFailureDetector(unittest.TestCase):
 
     def test_get_live_peers_excludes_dead(self):
         """get_live_peers() only returns peers with alive=True."""
-        mgr = make_manager(
-            self.tmp.name,
+        mgr = self._mgr(
             heartbeat_map={"node2": True, "node3": False},
         )
         mgr.detector._status = {"node2": True, "node3": False}
@@ -255,16 +272,23 @@ class TestPendingQueue(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.managers = []
 
     def tearDown(self):
+        for m in self.managers:
+            m.stop()
         self.tmp.cleanup()
+
+    def _mgr(self, **kw):
+        m = make_manager(self.tmp.name, **kw)
+        self.managers.append(m)
+        return m
 
     def test_pending_queue_filled_for_dead_peers(self):
         """
         When a peer is dead, failed replications go into the pending queue.
         """
-        mgr = make_manager(
-            self.tmp.name,
+        mgr = self._mgr(
             heartbeat_map={"node2": False, "node3": False},
         )
         mgr.detector._status = {"node2": False, "node3": False}
@@ -283,8 +307,7 @@ class TestPendingQueue(unittest.TestCase):
         replica_calls = []
         hb_map        = {"node2": False, "node3": False}
 
-        mgr = make_manager(
-            self.tmp.name,
+        mgr = self._mgr(
             heartbeat_map=hb_map,
             replica_calls=replica_calls,
         )
