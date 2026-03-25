@@ -2,11 +2,11 @@
 HiveChat – Fault Tolerance Module
 ==================================
 Responsibilities (Member 2 – Sihan, IT24103532):
-  1. Persistent message store  – JSON-backed, dedup by message_id
-  2. Failure detector          – threaded heartbeat loop, missed-count threshold
+  1. Persistent message store  – Atomic JSON-backed, dedup by message_id
+  2. Failure detector          – Parallel heartbeat loop with latency tracking
   3. Pending replication queue – retry failed replications when peer recovers
   4. FaultToleranceManager     – orchestrates all three sub-systems and exposes
-                                 metrics for evaluation
+                                 detailed metrics (latency, storage, success rates)
 """
 
 import json
@@ -14,6 +14,7 @@ import os
 import threading
 import time
 import uuid
+from concurrent import futures
 from typing import Callable, Dict, List, Optional
 
 
@@ -57,8 +58,11 @@ class PersistentMessageStore:
             return json.load(f)
 
     def _write_all(self, messages: List[Message]) -> None:
-        with open(self.file_path, "w", encoding="utf-8") as f:
+        """Write to a temporary file and rename to prevent data loss on crash."""
+        temp_file = f"{self.file_path}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(messages, f, indent=2)
+        os.replace(temp_file, self.file_path)
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -144,6 +148,8 @@ class FailureDetector:
         self._missed: Dict[str, int] = {p: 0 for p in peers}
         # alive status after applying threshold
         self._status: Dict[str, bool] = {p: False for p in peers}
+        # track response times (latency)
+        self._latencies: Dict[str, float] = {p: 0.0 for p in peers}
 
         self._lock = threading.Lock()
         self._running = False
@@ -163,35 +169,45 @@ class FailureDetector:
         if self._thread:
             self._thread.join(timeout=2.0)
 
-    # ── internal loop ─────────────────────────────────────────────────────
+    # ── parallel pings ────────────────────────────────────────────────────
+
+    def _ping_peer(self, peer: str) -> None:
+        """Ping a single peer, update status and track latency."""
+        start_time = time.time()
+        try:
+            responded = self.heartbeat_fn(peer)
+        except Exception:
+            responded = False
+        latency = time.time() - start_time
+
+        with self._lock:
+            was_alive = self._status[peer]
+            if responded:
+                self._missed[peer] = 0
+                self._status[peer] = True
+                self._latencies[peer] = round(latency, 4)
+                if not was_alive and self.on_peer_recovered:
+                    threading.Thread(
+                        target=self.on_peer_recovered,
+                        args=(peer,),
+                        daemon=True
+                    ).start()
+            else:
+                self._missed[peer] += 1
+                if self._missed[peer] >= self.threshold:
+                    self._status[peer] = False
+                    self._latencies[peer] = 0.0
 
     def _monitor_loop(self) -> None:
-        while self._running:
-            for peer in self.peers:
-                try:
-                    responded = self.heartbeat_fn(peer)
-                except Exception:
-                    responded = False
-
-                with self._lock:
-                    was_alive = self._status[peer]
-
-                    if responded:
-                        self._missed[peer] = 0
-                        self._status[peer] = True
-                        # if peer just recovered → notify manager
-                        if not was_alive and self.on_peer_recovered:
-                            threading.Thread(
-                                target=self.on_peer_recovered,
-                                args=(peer,),
-                                daemon=True
-                            ).start()
-                    else:
-                        self._missed[peer] += 1
-                        if self._missed[peer] >= self.threshold:
-                            self._status[peer] = False
-
-            time.sleep(self.interval_seconds)
+        """
+        Main monitoring loop. Uses a ThreadPoolExecutor to ping all peers
+        simultaneously to avoid serial delays.
+        """
+        with futures.ThreadPoolExecutor(max_workers=len(self.peers) or 1) as executor:
+            while self._running:
+                # Issue all pings in parallel
+                list(executor.map(self._ping_peer, self.peers))
+                time.sleep(self.interval_seconds)
 
     # ── queries ───────────────────────────────────────────────────────────
 
@@ -210,6 +226,10 @@ class FailureDetector:
     def is_alive(self, peer: str) -> bool:
         with self._lock:
             return self._status.get(peer, False)
+
+    def get_latencies(self) -> Dict[str, float]:
+        with self._lock:
+            return dict(self._latencies)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,12 +274,12 @@ class FaultToleranceManager:
     """
     Main fault-tolerance orchestrator.
 
-    Covers all five requirements for Member 1:
+    Covers all five requirements for Member 2:
       ✔ Message redundancy    – replication_factor copies stored across cluster
-      ✔ Failure detection     – FailureDetector with missed-count threshold
+      ✔ Failure detection     – FailureDetector with parallel pings + threshold
       ✔ Automatic failover    – skip dead peers; client stays connected via list
       ✔ Node recovery         – recover_from_peers() on rejoin + queue drain
-      ✔ Redundancy metrics    – storage_overhead_bytes, per-peer success rates
+      ✔ Redundancy metrics    – storage_overhead, per-peer success, and latency
     """
 
     def __init__(
@@ -493,6 +513,7 @@ class FaultToleranceManager:
             # overhead: if RF=2, total bytes stored cluster-wide ≈ 2× single node
             "estimated_storage_overhead_multiplier": self.replication_factor,
             "pending_queue_total":            self.pending_queue.total_pending(),
+            "peer_latencies_seconds":         self.detector.get_latencies(),
             "per_peer_replication":           per_peer,
             "missed_heartbeat_counts":        self.detector.get_missed_counts(),
             "metrics":                        dict(self.metrics),
