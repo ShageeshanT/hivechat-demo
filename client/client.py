@@ -10,6 +10,7 @@ Uses gRPC (MessagingService) and automatic failover:
 import argparse
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import grpc
@@ -88,7 +89,6 @@ class HiveChatClient:
         Open a gRPC channel to `server` and call SendMessage.
         Raises grpc.RpcError on any transport / server failure.
         """
-        import uuid, time as _time
         with grpc.insecure_channel(server) as channel:
             stub    = hivechat_pb2_grpc.MessagingServiceStub(channel)
             request = hivechat_pb2.SendMessageRequest(
@@ -97,7 +97,7 @@ class HiveChatClient:
                     sender      = self.username,
                     receiver    = recipient,
                     content     = content,
-                    timestamp   = _time.time(),
+                    timestamp   = time.time(),
                     origin_node = "client",
                 )
             )
