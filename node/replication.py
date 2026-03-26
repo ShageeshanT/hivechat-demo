@@ -176,6 +176,8 @@ class ReplicationManager:
         quorum_w: int = 2,
         quorum_r: int = 2,
         consensus=None,
+        time_syncer=None,
+        reorderer=None,
     ):
         self.node_id    = node_id
         self.peers      = peers          # e.g. ["localhost:5002", "localhost:5003"]
@@ -186,6 +188,10 @@ class ReplicationManager:
         # Sub-components
         self.store       = MessageStore()
         self.vector_clock = VectorClock(node_id, all_node_ids)
+
+        # Time synchronization (Shagee's module)
+        self.time_syncer = time_syncer   # TimeSyncer instance for adjusted timestamps
+        self.reorderer   = reorderer     # MessageReorderer for causal delivery
 
     #  3a. Deduplication Check 
 
@@ -202,13 +208,24 @@ class ReplicationManager:
         Called by the server when a client POSTs a new message.
         """
         clock_snapshot = self.vector_clock.tick()   # Advance our clock
+
+        # Use TimeSyncer for offset-corrected timestamp if available
+        if self.time_syncer:
+            timestamp = self.time_syncer.get_adjusted_time()
+            lamport_time = self.time_syncer.lamport.tick()
+        else:
+            timestamp = time.time()
+            lamport_time = 0
+
         message = {
             "id":           str(uuid.uuid4()),       # Globally unique ID
             "chat_id":      chat_id,
             "sender":       sender,
             "content":      content,
-            "timestamp":    time.time(),             # Unix epoch float
+            "timestamp":    timestamp,               # Offset-corrected time
+            "lamport_time": lamport_time,            # Lamport logical clock value
             "vector_clock": clock_snapshot,          # Causal position of this message
+            "sender_id":    self.node_id,            # Needed by MessageReorderer
             "status":       "pending",               # Will become "committed" after quorum
         }
         return message
@@ -309,11 +326,26 @@ class ReplicationManager:
         if self._is_duplicate(message["id"]):
             return True  # Already have it, acknowledge anyway
 
-        # Merge the incoming vector clock with ours
-        updated_clock = self.vector_clock.update(message["vector_clock"])
-        message["vector_clock"] = updated_clock
         message["status"] = "committed"  # We trust the sender already achieved quorum
-        self.store.save(message)
+
+        # Update Lamport clock from the incoming message if TimeSyncer is available
+        if self.time_syncer and "lamport_time" in message:
+            self.time_syncer.lamport.update(message["lamport_time"])
+
+        # Route through MessageReorderer for causal delivery if available.
+        # We preserve the original vector_clock for the reorderer's causal
+        # check, then merge into our own clock after delivery.
+        if self.reorderer:
+            def _deliver(msg):
+                updated_clock = self.vector_clock.update(msg["vector_clock"])
+                msg["vector_clock"] = updated_clock
+                self.store.save(msg)
+            self.reorderer.try_deliver(message, _deliver)
+        else:
+            updated_clock = self.vector_clock.update(message["vector_clock"])
+            message["vector_clock"] = updated_clock
+            self.store.save(message)
+
         print(f"[Replication] Received replica for msg {message['id']}")
         return True
 
