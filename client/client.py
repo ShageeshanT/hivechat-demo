@@ -68,6 +68,11 @@ class HiveChatClient:
         """
         last_error = None
         num_servers = len(self.servers)
+        
+        # Idempotency Key: created BEFORE the retry loop!
+        # If the primary server crashes during the RPC response but actually saved the message, 
+        # retrying with this exact same ID allows the backup server to safely deduplicate it.
+        message_id = str(uuid.uuid4())
 
         for attempt in range(num_servers):
             # rotate through the list, starting from _current_index
@@ -75,7 +80,7 @@ class HiveChatClient:
             server = self.servers[idx]
 
             try:
-                result = self.send_message_to_server(server, recipient, content)
+                result = self.send_message_to_server(server, recipient, content, message_id)
                 self._current_index = idx          # remember the working server
                 print(f"[FAILOVER] Delivered via {server}")
                 return result
@@ -87,7 +92,7 @@ class HiveChatClient:
 
         raise RuntimeError(f"All servers failed. Last error: {last_error}")
 
-    def send_message_to_server(self, server: str, recipient: str, content: str) -> dict:
+    def send_message_to_server(self, server: str, recipient: str, content: str, message_id: str) -> dict:
         """
         Open a gRPC channel to `server` and call SendMessage.
         Raises grpc.RpcError on any transport / server failure.
@@ -96,7 +101,7 @@ class HiveChatClient:
             stub    = hivechat_pb2_grpc.MessagingServiceStub(channel)
             request = hivechat_pb2.SendMessageRequest(
                 message=hivechat_pb2.ChatMessage(
-                    message_id  = str(uuid.uuid4()),
+                    message_id  = message_id,
                     sender      = self.username,
                     receiver    = recipient,
                     content     = content,
