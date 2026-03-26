@@ -1,0 +1,7 @@
+{
+  "sync_interval": 5.0,
+  "sample_count": 8,
+  "max_offset_ms": 500,
+  "buffer_timeout": 10.0,
+  "grpc_port": 50051
+}
