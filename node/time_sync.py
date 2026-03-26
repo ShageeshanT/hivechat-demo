@@ -46,6 +46,13 @@ from node.sync_config import SyncConfig
 
 logger = logging.getLogger("hivechat.time_sync")
 
+__all__ = [
+    "LamportClock",
+    "TimeSyncer",
+    "MessageReorderer",
+    "get_sync_stats",
+]
+
 
 # SECTION 1: Lamport Logical Clock
 # A simple scalar clock that ensures causal ordering of events.
