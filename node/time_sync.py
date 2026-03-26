@@ -6,6 +6,35 @@ Responsibilities:
   1. LamportClock     — logical clock for causal ordering
   2. TimeSyncer       — NTP-style offset correction for physical timestamps
   3. MessageReorderer — re-sort messages that arrive out of order
+
+Architecture Overview:
+  ┌─────────────┐      gRPC (TimeSyncService)      ┌─────────────┐
+  │   Node A    │ ◄──────────────────────────────► │   Node B    │
+  │ TimeSyncer  │   offset = server - (send+rtt/2) │ (reference) │
+  │ LamportClock│                                   └─────────────┘
+  └──────┬──────┘
+         │  get_adjusted_time()
+         ▼
+  ┌──────────────────┐      on_deliver(msg)      ┌──────────────┐
+  │ MessageReorderer │ ─────────────────────────► │  Chat Window │
+  │ (causal buffer)  │                            │  / Client    │
+  └──────────────────┘                            └──────────────┘
+
+  Flow:
+    1. TimeSyncer runs a background thread that periodically polls the
+       reference node (Raft leader) to estimate the clock offset.
+    2. When sending a message, the node stamps it with:
+       - get_adjusted_time()  → physical timestamp (offset-corrected)
+       - lamport.tick()       → logical timestamp
+    3. When receiving a message, the node:
+       - Calls lamport.update(msg.lamport_time) to merge clocks.
+       - Passes the message to MessageReorderer.try_deliver().
+       - The reorderer checks vector clock dependencies and either
+         delivers immediately or buffers until dependencies are met.
+
+  Configuration:
+    All tuneable parameters (sync_interval, sample_count, buffer_timeout,
+    etc.) can be overridden via config/time_sync.json. See sync_config.py.
 """
 
 import time

@@ -5,6 +5,18 @@ Member: Shagee (IT24103322)
 Loads sync parameters from a JSON config file with sensible defaults.
 Allows tuning sync interval, sample count, buffer timeout, etc.
 without modifying source code.
+
+Supported config keys (in config/time_sync.json):
+  sync_interval  — seconds between NTP-style sync polls (default: 5.0)
+  sample_count   — number of offset samples for median filter (default: 8)
+  max_offset_ms  — warn threshold in milliseconds (default: 500)
+  buffer_timeout — seconds before force-delivering stuck messages (default: 10.0)
+  grpc_port      — default gRPC port for TimeSyncService (default: 50051)
+
+Priority order:
+  1. Explicit constructor arguments (e.g. buffer_timeout=30.0)
+  2. Values from the JSON config file
+  3. Built-in DEFAULTS defined in this module
 """
 
 import json
