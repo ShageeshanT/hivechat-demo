@@ -677,3 +677,82 @@ class RaftNode:
             if self.replication is not None:
                 self.replication.apply_committed_entry(entry.to_dict())
 
+    # CLUSTER MANAGEMENT HELPERS
+
+    def set_peers(self, peers: list["RaftNode"]) -> None:
+        """
+        Update the peer list.  Useful for setting up the cluster after
+        all nodes have been created.
+
+        RESPONSIBILITY: CONSENSUS
+        """
+        self.peers = peers
+
+    def simulate_crash(self) -> None:
+        """
+        Simulate a node crash by setting active = False.
+
+        The node will ignore all incoming RPCs until ``recover()`` is called.
+        This is used by tests to simulate failures.
+
+        RESPONSIBILITY: CONSENSUS (testing helper)
+        """
+        self.active = False
+
+    def recover(self) -> None:
+        """
+        Simulate a node recovering after a crash.
+
+        The node becomes active again as a FOLLOWER.  Its log and persistent
+        state are preserved (simulating durable storage).
+
+        RESPONSIBILITY: CONSENSUS (testing helper)
+        """
+        self.active = True
+        self.state = NodeState.FOLLOWER
+        self.leader_id = -1
+        self.voted_for = None
+
+    def partition_from(self, node_ids: set[int]) -> None:
+        """
+        Simulate a network partition: this node cannot communicate with
+        the given set of node IDs.
+
+        RESPONSIBILITY: CONSENSUS (testing helper)
+        """
+        self.partitioned_from = node_ids
+
+    def heal_partition(self) -> None:
+        """
+        Remove all network partition restrictions.
+
+        RESPONSIBILITY: CONSENSUS (testing helper)
+        """
+        self.partitioned_from = set()
+
+    def sync_from_leader(self, leader: "RaftNode") -> bool:
+        """
+        Manually sync this node's log from the given leader.
+
+        This is a convenience method for testing node-rejoin scenarios.
+        In a real Raft implementation, the normal AppendEntries mechanism
+        would handle this automatically via log backtracking.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: When a node comes back after a crash, it needs to catch up
+             on any log entries it missed.
+        """
+        if not self.active or not leader.active:
+            return False
+        if leader.state != NodeState.LEADER:
+            return False
+
+        # The leader sends all entries this node is missing
+        leader._send_append_entries_to_peer(self)
+
+        # Also advance commit index
+        if leader.commit_index > self.commit_index:
+            self.commit_index = min(leader.commit_index, len(self.log) - 1)
+            self._apply_committed_entries()
+
+        return True
