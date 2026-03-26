@@ -605,3 +605,75 @@ class RaftNode:
 
         return True
 
+    # COMMIT LOGIC
+
+    def commit_entries(self) -> None:
+        """
+        Advance the leader's commit_index based on majority replication.
+
+        An entry at index N is committed when a MAJORITY of nodes have it
+        in their log (match_index[peer] >= N for a majority) AND the entry
+        is from the current term.
+
+        After advancing commit_index, apply newly committed entries to the
+        replication state machine.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: Committing only after majority ensures that a committed entry
+             will survive any single node failure — any future leader must
+             have it in its log (by the election restriction).
+        """
+        if self.state != NodeState.LEADER:
+            return
+
+        total_nodes = len(self.peers) + 1
+        majority_needed = (total_nodes // 2) + 1
+
+        # Check each uncommitted entry starting from the end of the log
+        # (optimization: start from the highest possible new commit point).
+        for n in range(len(self.log) - 1, self.commit_index, -1):
+            # Only commit entries from the CURRENT term.
+            # WHY: Raft never directly commits entries from previous terms.
+            #      They get committed indirectly when a current-term entry
+            #      after them is committed (§5.4.2 of the Raft paper).
+            if self.log[n].term != self.current_term:
+                continue
+
+            # Count how many nodes have this entry
+            replicated_count = 1  # Leader has it
+            for peer in self.peers:
+                if self.match_index.get(peer.node_id, -1) >= n:
+                    replicated_count += 1
+
+            if replicated_count >= majority_needed:
+                self.commit_index = n
+                self._apply_committed_entries()
+                break  # We found the highest committed index
+
+    def _apply_committed_entries(self) -> None:
+        """
+        Apply all committed but not-yet-applied entries to the replication
+        state machine.
+
+        This is where CONSENSUS hands off to REPLICATION.
+
+        For each newly committed entry, we call:
+            replication.apply_committed_entry(entry_dict)
+
+        RESPONSIBILITY:
+            CONSENSUS  → decides WHEN an entry is committed.
+            REPLICATION → stores the committed entry for retrieval.
+
+        WHY: The replication module is the persistent store.  Once Raft has
+             achieved consensus on an entry (majority agreement), it is safe
+             to apply it to the state machine.
+        """
+        while self.last_applied < self.commit_index:
+            self.last_applied += 1
+            entry = self.log[self.last_applied]
+
+            # ===== REPLICATION RESPONSIBILITY =====
+            # Hand off the committed entry to the replication module.
+            if self.replication is not None:
+                self.replication.apply_committed_entry(entry.to_dict())
+
