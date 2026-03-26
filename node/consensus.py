@@ -476,3 +476,132 @@ class RaftNode:
                 continue
 
             self._send_append_entries_to_peer(peer)
+
+    def _send_append_entries_to_peer(self, peer: "RaftNode") -> None:
+        """
+        Send AppendEntries to a single peer, with backtracking on failure.
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: If the follower's log diverges (e.g. it missed some entries),
+             we must backtrack next_index until we find a matching point,
+             then re-send from there.
+        """
+        # Retry loop handles log backtracking
+        while True:
+            next_idx = self.next_index.get(peer.node_id, 0)
+
+            # Determine the previous entry's index/term for consistency check
+            prev_log_index = next_idx - 1
+            prev_log_term = (
+                self.log[prev_log_index].term
+                if 0 <= prev_log_index < len(self.log) else 0
+            )
+
+            # Entries to send: everything from next_idx onwards
+            entries_to_send = self.log[next_idx:]
+
+            success = peer.append_entries(
+                leader_id=self.node_id,
+                term=self.current_term,
+                prev_log_index=prev_log_index,
+                prev_log_term=prev_log_term,
+                entries=entries_to_send,
+                leader_commit=self.commit_index,
+            )
+
+            if success:
+                # Update next_index and match_index on success
+                if entries_to_send:
+                    self.next_index[peer.node_id] = next_idx + len(entries_to_send)
+                    self.match_index[peer.node_id] = self.next_index[peer.node_id] - 1
+                break
+            else:
+                # Backtrack: decrement next_index and retry
+                # WHY: The follower's log doesn't match at prev_log_index.
+                #      We step back one entry and try again.
+                if next_idx > 0:
+                    self.next_index[peer.node_id] = next_idx - 1
+                else:
+                    break  # Can't go back further
+
+    def append_entries(self, leader_id: int, term: int,
+                       prev_log_index: int, prev_log_term: int,
+                       entries: list, leader_commit: int) -> bool:
+        """
+        Handle an AppendEntries RPC (called on followers by the leader).
+
+        This serves two purposes:
+          1. HEARTBEAT: When `entries` is empty, it resets the election timer.
+          2. LOG REPLICATION: When `entries` is non-empty, new entries are
+             appended to this node's log.
+
+        Args:
+            leader_id:       Node ID of the leader sending this RPC.
+            term:            Leader's current term.
+            prev_log_index:  Index of the entry immediately BEFORE the new
+                             entries.  Used for consistency checking.
+            prev_log_term:   Term of the entry at prev_log_index.
+            entries:         List of LogEntry objects to append (may be empty).
+            leader_commit:   Leader's commit_index (so we can advance ours).
+
+        Returns:
+            True  if the entries were appended successfully.
+            False if rejected (stale term or log mismatch).
+
+        RESPONSIBILITY: CONSENSUS
+        WHY: This is how the leader's log gets replicated to every follower.
+             The consistency check ensures that followers never have gaps or
+             disagreements in their logs.
+        """
+        # Guard: inactive nodes do not respond
+        if not self.active:
+            return False
+
+        # Rule 1: Reject if sender's term is stale
+        if term < self.current_term:
+            return False
+
+        # Update term if sender has a newer term
+        if term > self.current_term:
+            self.current_term = term
+            self.voted_for = None
+
+        #  Recognize the sender as the legitimate leader
+        # WHY: Any valid AppendEntries with term >= ours means the sender
+        #      is the rightful leader.  We step down if we were a candidate.
+        self.state = NodeState.FOLLOWER
+        self.leader_id = leader_id
+
+        # Rule 2: Consistency check on previous entry
+        # WHY: To ensure logs are identical, we verify that the entry at
+        #      prev_log_index has the expected term.  If not, the follower's
+        #      log has diverged and the leader must backtrack.
+        if prev_log_index >= 0:
+            if prev_log_index >= len(self.log):
+                return False  # We don't have the previous entry
+            if self.log[prev_log_index].term != prev_log_term:
+                # Remove the conflicting entry and everything after it
+                self.log = self.log[:prev_log_index]
+                return False
+
+        #  Rule 3: Append new entries (skip duplicates)
+        for i, entry in enumerate(entries):
+            insert_index = prev_log_index + 1 + i
+            if insert_index < len(self.log):
+                if self.log[insert_index].term != entry.term:
+                    # Conflict: remove this entry and everything after
+                    self.log = self.log[:insert_index]
+                    self.log.append(entry)
+                # Else: entry already exists and matches — skip
+            else:
+                self.log.append(entry)
+
+        # Rule 4: Advance commit index
+        # WHY: The leader tells us its commit_index.  We can safely advance
+        #      our own commit_index up to that value (but not past our log).
+        if leader_commit > self.commit_index:
+            self.commit_index = min(leader_commit, len(self.log) - 1)
+            self._apply_committed_entries()
+
+        return True
+
