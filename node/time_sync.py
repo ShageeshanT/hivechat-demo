@@ -13,6 +13,7 @@ import logging
 import threading
 import statistics
 from typing import Optional
+from node.sync_config import SyncConfig
 
 logger = logging.getLogger("hivechat.time_sync")
 
@@ -102,7 +103,8 @@ class TimeSyncer:
     SAMPLE_COUNT:  int   = 8     # how many samples to median-filter
     MAX_OFFSET_MS: float = 500   # warn if offset exceeds this (milliseconds)
 
-    def __init__(self, node_id: int, reference_addr: Optional[str] = None):
+    def __init__(self, node_id: int, reference_addr: Optional[str] = None,
+                 config: Optional[SyncConfig] = None):
         self.node_id        = node_id
         self.reference_addr = reference_addr   # address of the node to sync against
         self.offset: float  = 0.0              # current best estimate of clock offset
@@ -110,6 +112,12 @@ class TimeSyncer:
         self._lock    = threading.Lock()
         self._running = False
         self.lamport  = LamportClock()         # each node's Lamport clock lives here
+
+        # Apply config overrides if provided
+        if config:
+            self.SYNC_INTERVAL = config.get("sync_interval")
+            self.SAMPLE_COUNT  = config.get("sample_count")
+            self.MAX_OFFSET_MS = config.get("max_offset_ms")
 
     def start(self):
         """Start the background sync thread (daemon, won't block shutdown)."""
@@ -273,12 +281,20 @@ class MessageReorderer:
 
     BUFFER_TIMEOUT: float = 10.0  # seconds before a buffered message is force-delivered
 
-    def __init__(self, buffer_timeout: float = None):
+    def __init__(self, buffer_timeout: float = None,
+                 config: Optional[SyncConfig] = None):
         self._delivered: dict[int, int] = {}   # node_id -> highest delivered seq
         self._delivered_ids: set[str]   = set()
         self._buffer: list[dict]        = []
         self._lock = threading.Lock()
-        self._buffer_timeout = buffer_timeout or self.BUFFER_TIMEOUT
+
+        # Priority: explicit arg > config file > class default
+        if buffer_timeout is not None:
+            self._buffer_timeout = buffer_timeout
+        elif config:
+            self._buffer_timeout = config.get("buffer_timeout")
+        else:
+            self._buffer_timeout = self.BUFFER_TIMEOUT
 
     def try_deliver(self, message: dict, on_deliver) -> None:
         """Attempt to deliver a message, buffering it if dependencies are unmet.
