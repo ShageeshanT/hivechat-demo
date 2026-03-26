@@ -60,6 +60,7 @@ class PersistentMessageStore:
         # ensure table exists
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS messages (
                         message_id TEXT PRIMARY KEY,
@@ -242,25 +243,59 @@ class FailureDetector:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PendingReplicationQueue:
-    def __init__(self):
-        self._queue: Dict[str, List[Message]] = {}
+    """
+    When a replication attempt to a peer fails, the message ID is queued here in SQLite.
+    When the peer is declared alive again the queue is drained automatically.
+    Survives node restarts.
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
         self._lock = threading.Lock()
+        
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS pending_queue (
+                        peer TEXT,
+                        message_id TEXT,
+                        PRIMARY KEY (peer, message_id)
+                    )
+                """)
 
     def enqueue(self, peer: str, message: Message) -> None:
-        with self._lock:
-            self._queue.setdefault(peer, []).append(message)
+        with self._lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO pending_queue (peer, message_id) VALUES (?, ?)",
+                    (peer, message["message_id"])
+                )
 
     def drain(self, peer: str) -> List[Message]:
-        with self._lock:
-            return self._queue.pop(peer, [])
+        """Return and remove all pending messages for a peer."""
+        with self._lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            with conn:
+                cursor = conn.execute("""
+                    SELECT m.* FROM messages m 
+                    JOIN pending_queue pq ON m.message_id = pq.message_id 
+                    WHERE pq.peer = ?
+                """, (peer,))
+                rows = cursor.fetchall()
+                conn.execute("DELETE FROM pending_queue WHERE peer = ?", (peer,))
+            
+            return [dict(row) for row in rows]
 
     def pending_count(self, peer: str) -> int:
-        with self._lock:
-            return len(self._queue.get(peer, []))
+        with self._lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM pending_queue WHERE peer = ?", (peer,))
+            return cursor.fetchone()[0]
 
     def total_pending(self) -> int:
-        with self._lock:
-            return sum(len(v) for v in self._queue.values())
+        with self._lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM pending_queue")
+            return cursor.fetchone()[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -295,7 +330,7 @@ class FaultToleranceManager:
         self.replicate_fn = replicate_fn
         self.fetch_messages_fn = fetch_messages_fn
 
-        self.pending_queue = PendingReplicationQueue()
+        self.pending_queue = PendingReplicationQueue(store_path)
 
         self.detector = FailureDetector(
             peers=peers,

@@ -313,9 +313,9 @@ class TestPendingQueue(unittest.TestCase):
         )
         mgr.detector._status = {"node2": False, "node3": False}
 
-        # Queue a message for node2
+        # Queue a message for node2 by failing the live replication
         msg = mgr.build_message("A", "B", "retry me")
-        mgr.pending_queue.enqueue("node2", msg)
+        mgr.handle_client_message(msg)
         self.assertEqual(mgr.pending_queue.pending_count("node2"), 1)
 
         # Simulate node2 coming back alive
@@ -330,9 +330,32 @@ class TestPendingQueue(unittest.TestCase):
 class TestPendingReplicationQueueUnit(unittest.TestCase):
     """Direct unit test for PendingReplicationQueue."""
 
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "test_queue.db")
+        # Ensure 'messages' table exists because drain() joins on it!
+        import sqlite3, contextlib
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute("""
+                    CREATE TABLE messages (
+                        message_id TEXT PRIMARY KEY, sender TEXT, receiver TEXT, content TEXT, timestamp REAL, origin_node TEXT
+                    )
+                """)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
     def test_enqueue_drain(self):
-        q   = PendingReplicationQueue()
-        msg = {"message_id": "x", "content": "hi"}
+        q   = PendingReplicationQueue(self.db_path)
+        msg = {"message_id": "x", "content": "hi", "sender": "A", "receiver": "B", "timestamp": 1.0, "origin_node": "N"}
+        
+        # Manually insert message into `messages` table so JOIN succeeds
+        import sqlite3, contextlib
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute("INSERT INTO messages (message_id, sender, receiver, content, timestamp, origin_node) VALUES (?, ?, ?, ?, ?, ?)", ("x", "A", "B", "hi", 1.0, "N"))
+
         q.enqueue("peer1", msg)
 
         self.assertEqual(q.pending_count("peer1"), 1)
@@ -343,7 +366,7 @@ class TestPendingReplicationQueueUnit(unittest.TestCase):
         self.assertEqual(q.pending_count("peer1"), 0)
 
     def test_drain_unknown_peer_returns_empty(self):
-        q = PendingReplicationQueue()
+        q = PendingReplicationQueue(self.db_path)
         self.assertEqual(q.drain("ghost"), [])
 
 
