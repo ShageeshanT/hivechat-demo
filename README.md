@@ -35,24 +35,24 @@ When a user submits a message, the receiving node processes it through four crit
 
 HiveChat integrates four fundamental distributed computing modules, each managed by a dedicated mechanism:
 
-### 1. Fault Tolerance & Recovery (Member 2: Sihan)
+### 1. Fault Tolerance & Recovery (Sihan - IT24103532)
 Ensures system liveness and data durability despite unexpected node crashes.
 - **Persistent Storage Engine**: Messages are persisted to disk using SQLite/JSON with unique idempotency keys to prevent duplication during network retries.
 - **Failure Detection**: Implements a heartbeat mechanism that proactively probes peers. A threshold of consecutive missed beats flags a node as dead.
 - **Automated Catch-Up**: Upon rejoining the network, a recovering node automatically queries healthy peers to fetch and replay missed history.
 - **Pending Queues**: Disconnected peers do not lose messages; the active cluster queues outgoing replicas and pushes them immediately upon the peer's return.
 
-### 2. Data Replication (Member 3: Maheesha)
+### 2. Data Replication (Maheesha - IT24103477)
 Guarantees data availability and consistency across the physical cluster.
 - **Quorum-Based Replication**: Read and write operations require acknowledgments from a calculated quorum to ensure strict consistency.
 - **Conflict Resolution**: Employs vector clocks and causal tracking to deduplicate and resolve conflicting state writes across distributed geographic boundaries.
 
-### 3. Time Synchronization (Member 4: Shagee)
+### 3. Time Synchronization (Shagee - IT24103322)
 Maintains temporal order in an environment lacking a shared global clock.
 - **Clock Synchronization**: Implements an NTP-style offset calculation algorithm to keep node clocks synchronized against an authoritative reference.
 - **Causal Ordering**: Utilizes Lamport timestamps to enforce chronological message reordering on the receiving end, preserving conversational continuity.
 
-### 4. Raft Consensus (Member 5: Gunitha)
+### 4. Raft Consensus (Gunitha - IT24610787)
 Establishes distributed agreement without human intervention.
 - **Leader Election**: Automated, randomized election timeouts ensure a single authoritative leader is chosen flawlessly.
 - **Log Replication**: The elected leader coordinates strict log replication across followers, ensuring the global state machine is deterministic and synchronized.
