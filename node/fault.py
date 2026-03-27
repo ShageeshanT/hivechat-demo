@@ -71,6 +71,15 @@ class PersistentMessageStore:
                         origin_node TEXT
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS system_log (
+                        timestamp REAL,
+                        level TEXT,
+                        event TEXT,
+                        peer TEXT,
+                        details TEXT
+                    )
+                """)
 
     def save_message(self, message: Message) -> bool:
         """
@@ -97,9 +106,11 @@ class PersistentMessageStore:
 
     def merge_messages(self, incoming: List[Message]) -> int:
         """
-        Merge messages fetched from a peer into the local store.
-        Returns the number of newly inserted messages.
+        Merge messages fetched from a peer into the local store in a single batch.
+        Very efficient for node rejoin/recovery.
         """
+        if not incoming:
+            return 0
         added = 0
         with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
@@ -119,6 +130,8 @@ class PersistentMessageStore:
                         added += 1
                     except sqlite3.IntegrityError:
                         continue
+                if added > 50:
+                    conn.execute("ANALYZE;")
         return added
 
     def get_all_messages(self) -> List[Message]:
@@ -131,6 +144,26 @@ class PersistentMessageStore:
         with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM messages")
             return cursor.fetchone()[0]
+
+    def log_event(self, level: str, event: str, peer: str = "none", details: str = "") -> None:
+        try:
+            with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO system_log VALUES (?,?,?,?,?)",
+                        (time.time(), level, event, peer, details)
+                    )
+        except Exception:
+            pass
+
+    def get_recent_logs(self, limit: int = 5) -> List[Dict[str, object]]:
+        try:
+            with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT * FROM system_log ORDER BY timestamp DESC LIMIT ?", (limit,))
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
 
     def size_bytes(self) -> int:
         try:
@@ -167,7 +200,12 @@ class FailureDetector:
 
         self._missed: Dict[str, int] = {p: 0 for p in peers}
         self._status: Dict[str, bool] = {p: False for p in peers}
-        self._latencies: Dict[str, float] = {p: 0.0 for p in peers}
+        
+        # Per-peer latency histogram (rolling min/max/last)
+        self._latencies: Dict[str, Dict[str, float]] = {
+            p: {"last": 0.0, "min": float('inf'), "max": 0.0, "avg": 0.0, "_count": 0} 
+            for p in peers
+        }
 
         self._lock = threading.Lock()
         self._running = False
@@ -198,7 +236,19 @@ class FailureDetector:
             if responded:
                 self._missed[peer] = 0
                 self._status[peer] = True
-                self._latencies[peer] = round(latency, 4)
+                
+                # Update histograms
+                l_data = self._latencies[peer]
+                l_data["last"] = round(latency, 4)
+                l_data["min"]  = round(min(l_data["min"], latency), 4)
+                l_data["max"]  = round(max(l_data["max"], latency), 4)
+                
+                # Simple rolling avg
+                prev_avg = l_data["avg"]
+                count    = l_data["_count"]
+                l_data["avg"] = round((prev_avg * count + latency) / (count + 1), 4)
+                l_data["_count"] += 1
+                
                 if not was_alive and self.on_peer_recovered:
                     threading.Thread(
                         target=self.on_peer_recovered,
@@ -209,7 +259,7 @@ class FailureDetector:
                 self._missed[peer] += 1
                 if self._missed[peer] >= self.threshold:
                     self._status[peer] = False
-                    self._latencies[peer] = 0.0
+                    self._latencies[peer]["last"] = 0.0
 
     def _monitor_loop(self) -> None:
         with futures.ThreadPoolExecutor(max_workers=len(self.peers) or 1) as executor:
@@ -233,9 +283,9 @@ class FailureDetector:
         with self._lock:
             return self._status.get(peer, False)
 
-    def get_latencies(self) -> Dict[str, float]:
+    def get_latencies(self) -> Dict[str, Dict[str, float]]:
         with self._lock:
-            return dict(self._latencies)
+            return {p: dict(v) for p, v in self._latencies.items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -468,15 +518,19 @@ class FaultToleranceManager:
                     self.metrics["messages_replicated_to_peers"] += 1
                 else:
                     self._peer_failures[peer] = self._peer_failures.get(peer, 0) + 1
-                    self._last_error[peer] = "peer_refused_rpc"
+                    error_msg = "peer_refused_rpc"
+                    self._last_error[peer] = error_msg
                     self.metrics["replication_failures"] += 1
+                    self.store.log_event("WARNING", "REPLICATION_REFUSED", peer, error_msg)
             return ok
         except Exception as exc:
             with self._stats_lock:
                 self._last_event_ts[peer] = time.time()
                 self._peer_failures[peer] = self._peer_failures.get(peer, 0) + 1
-                self._last_error[peer] = str(exc)
+                error_msg = str(exc)
+                self._last_error[peer] = error_msg
                 self.metrics["replication_failures"] += 1
+                self.store.log_event("ERROR", "REPLICATION_EXCEPTION", peer, error_msg)
             return False
 
     def recover_from_peers(self) -> int:
@@ -536,10 +590,20 @@ class FaultToleranceManager:
 
         detector_ok = self.detector._running
         
+        # Check for disk space warning (simple threshold for fault tolerance)
+        low_storage_warning = False
+        try:
+            db_size = self.store.size_bytes()
+            if db_size > 500 * 1024 * 1024: # 500MB threshold for demo
+                low_storage_warning = True
+        except Exception:
+            pass
+
         return {
-            "status": "healthy" if (storage_ok and detector_ok) else "degraded",
+            "status": "healthy" if (storage_ok and detector_ok and not low_storage_warning) else "degraded",
             "storage_ok": storage_ok,
             "detector_ok": detector_ok,
+            "low_storage_warning": low_storage_warning,
             "node_id": self.node_id
         }
 
@@ -578,5 +642,6 @@ class FaultToleranceManager:
             "missed_heartbeat_counts":        self.detector.get_missed_counts(),
             "internal_metrics":               dict(self.metrics),
             "liveness_status":                self.detector.get_status(),
-            "system_health":                  self.check_health()["status"]
+            "system_health":                  self.check_health()["status"],
+            "recent_fault_logs":              self.store.get_recent_logs(5)
         }
