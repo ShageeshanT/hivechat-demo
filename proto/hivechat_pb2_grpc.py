@@ -25,9 +25,8 @@ if _version_not_supported:
     )
 
 
-class TimeSyncServiceStub(object):
-    """Service for clock offset estimation between nodes.
-    """
+class MessagingServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
         """Constructor.
@@ -35,46 +34,61 @@ class TimeSyncServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.GetTime = channel.unary_unary(
-                '/hivechat.TimeSyncService/GetTime',
-                request_serializer=hivechat__pb2.TimeSyncRequest.SerializeToString,
-                response_deserializer=hivechat__pb2.TimeSyncResponse.FromString,
+        self.SendMessage = channel.unary_unary(
+                '/hivechat.MessagingService/SendMessage',
+                request_serializer=hivechat__pb2.SendMessageRequest.SerializeToString,
+                response_deserializer=hivechat__pb2.StatusResponse.FromString,
+                _registered_method=True)
+        self.GetMessages = channel.unary_unary(
+                '/hivechat.MessagingService/GetMessages',
+                request_serializer=hivechat__pb2.GetMessagesRequest.SerializeToString,
+                response_deserializer=hivechat__pb2.GetMessagesResponse.FromString,
                 _registered_method=True)
 
 
-class TimeSyncServiceServicer(object):
-    """Service for clock offset estimation between nodes.
-    """
+class MessagingServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
 
-    def GetTime(self, request, context):
-        """Single round-trip time sync exchange (like NTP).
+    def SendMessage(self, request, context):
+        """Client sends a new chat message to a node
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMessages(self, request, context):
+        """Recovering node pulls all stored messages from a peer
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
 
-def add_TimeSyncServiceServicer_to_server(servicer, server):
+def add_MessagingServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'GetTime': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetTime,
-                    request_deserializer=hivechat__pb2.TimeSyncRequest.FromString,
-                    response_serializer=hivechat__pb2.TimeSyncResponse.SerializeToString,
+            'SendMessage': grpc.unary_unary_rpc_method_handler(
+                    servicer.SendMessage,
+                    request_deserializer=hivechat__pb2.SendMessageRequest.FromString,
+                    response_serializer=hivechat__pb2.StatusResponse.SerializeToString,
+            ),
+            'GetMessages': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetMessages,
+                    request_deserializer=hivechat__pb2.GetMessagesRequest.FromString,
+                    response_serializer=hivechat__pb2.GetMessagesResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'hivechat.TimeSyncService', rpc_method_handlers)
+            'hivechat.MessagingService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('hivechat.TimeSyncService', rpc_method_handlers)
+    server.add_registered_method_handlers('hivechat.MessagingService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class TimeSyncService(object):
-    """Service for clock offset estimation between nodes.
-    """
+class MessagingService(object):
+    """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def GetTime(request,
+    def SendMessage(request,
             target,
             options=(),
             channel_credentials=None,
@@ -87,9 +101,153 @@ class TimeSyncService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/hivechat.TimeSyncService/GetTime',
-            hivechat__pb2.TimeSyncRequest.SerializeToString,
-            hivechat__pb2.TimeSyncResponse.FromString,
+            '/hivechat.MessagingService/SendMessage',
+            hivechat__pb2.SendMessageRequest.SerializeToString,
+            hivechat__pb2.StatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMessages(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hivechat.MessagingService/GetMessages',
+            hivechat__pb2.GetMessagesRequest.SerializeToString,
+            hivechat__pb2.GetMessagesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class FaultServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Heartbeat = channel.unary_unary(
+                '/hivechat.FaultService/Heartbeat',
+                request_serializer=hivechat__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=hivechat__pb2.HeartbeatResponse.FromString,
+                _registered_method=True)
+        self.Replicate = channel.unary_unary(
+                '/hivechat.FaultService/Replicate',
+                request_serializer=hivechat__pb2.ReplicateRequest.SerializeToString,
+                response_deserializer=hivechat__pb2.StatusResponse.FromString,
+                _registered_method=True)
+
+
+class FaultServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def Heartbeat(self, request, context):
+        """Liveness probe between nodes
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Replicate(self, request, context):
+        """Primary node pushes a replica to a peer
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_FaultServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Heartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.Heartbeat,
+                    request_deserializer=hivechat__pb2.HeartbeatRequest.FromString,
+                    response_serializer=hivechat__pb2.HeartbeatResponse.SerializeToString,
+            ),
+            'Replicate': grpc.unary_unary_rpc_method_handler(
+                    servicer.Replicate,
+                    request_deserializer=hivechat__pb2.ReplicateRequest.FromString,
+                    response_serializer=hivechat__pb2.StatusResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'hivechat.FaultService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('hivechat.FaultService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class FaultService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def Heartbeat(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hivechat.FaultService/Heartbeat',
+            hivechat__pb2.HeartbeatRequest.SerializeToString,
+            hivechat__pb2.HeartbeatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Replicate(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hivechat.FaultService/Replicate',
+            hivechat__pb2.ReplicateRequest.SerializeToString,
+            hivechat__pb2.StatusResponse.FromString,
             options,
             channel_credentials,
             insecure,
