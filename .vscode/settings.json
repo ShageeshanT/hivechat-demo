@@ -1,0 +1,11 @@
+{
+    // Use Pylance (Pyright) as the type checker — this is the standard, well-supported one.
+    // Pyre2 is experimental and has known false positives with basic Python arithmetic.
+    "python.analysis.typeCheckingMode": "basic",
+    "python.languageServer": "Pylance",
+
+    // Tell Pylance where to find project modules (fixes the test import red underline too)
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}"
+    ]
+}
