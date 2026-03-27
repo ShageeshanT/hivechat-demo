@@ -2,7 +2,10 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-import hivechat_pb2 as hivechat__pb2
+try:
+    from proto import hivechat_pb2 as hivechat__pb2
+except ImportError:
+    import hivechat_pb2 as hivechat__pb2
 
 
 class MessagingServiceStub(object):
