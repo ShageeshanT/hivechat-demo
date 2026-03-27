@@ -1,12 +1,9 @@
-"""
-HiveChat – Fault Tolerance Module
-==================================
-Responsibilities (Member 2 – Sihan, IT24103532):
-  1. Persistent message store  – SQLite-backed, dedup by message_id
-  2. Failure detector          – Parallel heartbeat loop with latency tracking
-  3. Pending replication queue – retry failed replications when peer recovers
-  4. FaultToleranceManager     – orchestrates all three sub-systems and exposes
-                                 detailed metrics (latency, storage, success rates)
+"""HiveChat  Fault Tolerance Module
+Responsibilities (Member 2  Sihan, IT24103532):
+  1. Persistent message store   SQLite-backed, dedup by message_id
+  2. Failure detector           Parallel heartbeat loop with latency tracking
+  3. Pending replication queue  retry failed replications when peer recovers
+  4. FaultToleranceManager      orchestrates all three sub-systems and expose detailed metrics (latency, storage, success rates)
 """
 
 import json
@@ -21,8 +18,7 @@ from concurrent import futures
 from typing import Callable, Dict, List, Optional
 
 
-# ── logger setup ─────────────────────────────────────────────────────────────
-
+# logger setup 
 logger = logging.getLogger("HiveChatFault")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
@@ -31,18 +27,15 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 
-# ── Type aliases ─────────────────────────────────────────────────────────────
-
+# Type aliases for better readability
 Message             = Dict[str, object]
 HeartbeatFunction   = Callable[[str], bool]
 ReplicateFunction   = Callable[[str, Message], bool]
 FetchMessagesFunction = Callable[[str], List[Message]]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. Persistent Message Store
-# ─────────────────────────────────────────────────────────────────────────────
 
+# 1. Persistent Message Store 
 class PersistentMessageStore:
     """
     Local persistent store for fault tolerance.
@@ -139,10 +132,7 @@ class PersistentMessageStore:
             return 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # 2. Failure Detector  (missed-count threshold model)
-# ─────────────────────────────────────────────────────────────────────────────
-
 class FailureDetector:
     """
     Periodically pings every peer via heartbeat_fn.
@@ -238,10 +228,8 @@ class FailureDetector:
             return dict(self._latencies)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Pending Replication Queue
-# ─────────────────────────────────────────────────────────────────────────────
 
+# 3. Pending Replication Queue
 class PendingReplicationQueue:
     """
     When a replication attempt to a peer fails, the message ID is queued here in SQLite.
@@ -298,10 +286,7 @@ class PendingReplicationQueue:
             return cursor.fetchone()[0]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # 4. Fault Tolerance Manager
-# ─────────────────────────────────────────────────────────────────────────────
-
 class FaultToleranceManager:
     def __init__(
         self,
