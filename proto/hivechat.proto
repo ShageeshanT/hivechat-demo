@@ -75,3 +75,23 @@ service FaultService {
   // Primary node pushes a replica to a peer
   rpc Replicate (ReplicateRequest) returns (StatusResponse);
 }
+
+// ─────────────────────────────────────────────
+// TimeSyncService – node ↔ reference node (Time Synchronization)
+// ─────────────────────────────────────────────
+
+message TimeSyncRequest {
+  int32  node_id          = 1;
+  double client_send_time = 2;
+}
+
+message TimeSyncResponse {
+  double client_send_time = 1;
+  double server_time      = 2;
+  int32  server_node_id   = 3;
+}
+
+service TimeSyncService {
+  // Client node asks reference node for the current server time to compute clock offset
+  rpc GetTime (TimeSyncRequest) returns (TimeSyncResponse);
+}

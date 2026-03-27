@@ -6,12 +6,14 @@ Strategy: Quorum-Based Replication (N=3, W=2, R=2)
 Consistency: Eventual Consistency with deduplication
 """
 
-# pyright: basic     # Use Pylance/Pyright as the type checker (not Pyre2)
+
 
 import uuid
 import time
 import threading
 from typing import Optional
+import grpc
+from proto import hivechat_pb2, hivechat_pb2_grpc
 
 # SECTION 1: Message Store
 # Stores every message this node holds, along with metadata.
@@ -270,15 +272,28 @@ class ReplicationManager:
     def _forward_to_peer(self, peer: str, message: dict) -> bool:
         """
         Send a message to a peer node and return True if it acknowledged.
-        ── STUB ──  Replace with actual gRPC call in integration phase.
-
-        gRPC call will look like:
-            stub = ReplicationStub(channel)
-            response = stub.ReplicateMessage(ReplicateRequest(message=message))
-            return response.success
+        Uses a real gRPC call via the FaultService Replicate RPC.
+        Falls back to False on any network error.
         """
-        print(f"[Replication] Forwarding to {peer} ... (stub, always True for now)")
-        return True  # Stub: assume peer always acks
+        try:
+            with grpc.insecure_channel(peer) as ch:
+                stub = hivechat_pb2_grpc.FaultServiceStub(ch)
+                req  = hivechat_pb2.ReplicateRequest(
+                    source_node_id = str(self.node_id),
+                    message = hivechat_pb2.ChatMessage(
+                        message_id  = message["id"],
+                        sender      = message["sender"],
+                        receiver    = message.get("receiver", ""),
+                        content     = message["content"],
+                        timestamp   = float(message["timestamp"]),
+                        origin_node = str(self.node_id),
+                    )
+                )
+                resp = stub.Replicate(req, timeout=5.0)
+                return resp.success
+        except Exception as e:
+            print(f"[Replication] peer {peer} failed: {e}")
+            return False
 
     # ── 3d. Quorum Read ──────────────────────────────────────────────────────
 
@@ -371,3 +386,38 @@ class ReplicationManager:
                 new_count += 1  # type: ignore[operator]  # Pyre2 false-positive on int +=
         print(f"[Replication] Sync applied: {new_count} new messages learned.")
         return new_count
+
+    # ── 3g. Consensus → Replication interface ───────────────────────────────
+
+    def apply_committed_entry(self, entry_dict: dict) -> None:
+        """
+        Called by the Raft consensus module after an entry has been committed
+        by a majority of nodes.
+
+        entry_dict looks like: {"term": int, "message": str}
+
+        RESPONSIBILITY: CONSENSUS decides WHEN to commit; REPLICATION decides
+        HOW to store.  This method is the handover point.
+        """
+        message_id = str(uuid.uuid4())
+        clock_snapshot = self.vector_clock.tick()
+
+        if self.time_syncer:
+            timestamp = self.time_syncer.get_adjusted_time()
+        else:
+            timestamp = time.time()
+
+        msg = {
+            "id":           message_id,
+            "chat_id":      "raft-log",
+            "sender":       f"node{self.node_id}",
+            "content":      entry_dict.get("message", ""),
+            "timestamp":    timestamp,
+            "lamport_time": self.time_syncer.lamport.tick() if self.time_syncer else 0,
+            "vector_clock": clock_snapshot,
+            "sender_id":    self.node_id,
+            "status":       "committed",   # Already committed by Raft majority
+            "raft_term":    entry_dict.get("term", 0),
+        }
+        self.store.save(msg)
+        print(f"[Replication] Raft entry committed → stored as msg {message_id[:8]}…")

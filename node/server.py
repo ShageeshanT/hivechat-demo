@@ -2,9 +2,11 @@
 HiveChat – Main Server Node
 ============================
 Entry point for starting a distributed messaging node.
-Integrates:
-  • Fault Tolerance  (Member 2 – Sihan)
-  • gRPC server      (MessagingService + FaultService)
+Integrates ALL FOUR distributed-system modules:
+  • Fault Tolerance        (Member 2 – Sihan)
+  • Data Replication       (Member 3 – Maheesha)
+  • Time Synchronization   (Member 4 – Shagee)
+  • Raft Consensus         (Member 5 – Gunitha)
 
 Run:
     python node/server.py --node-id 1 --port 5001
@@ -31,7 +33,12 @@ if str(PROTO_DIR) not in sys.path:
 
 # ── generated gRPC stubs ──────────────────────────────────────────────────────
 from proto import hivechat_pb2, hivechat_pb2_grpc
+
+# ── distributed system modules ────────────────────────────────────────────────
 from node.fault import FaultToleranceManager
+from node.replication import ReplicationManager
+from node.time_sync import TimeSyncer, MessageReorderer
+from node.consensus import RaftNode
 
 # Heartbeat RPC timeout (seconds) – short so failure detection stays responsive
 HEARTBEAT_TIMEOUT = 2.0
@@ -65,10 +72,7 @@ class MessagingServicer(hivechat_pb2_grpc.MessagingServiceServicer):
             "timestamp":   msg_proto.timestamp,
             "origin_node": msg_proto.origin_node,
         }
-
-        # Let fault manager handle storage + replication
         result = self._node.fault_manager.handle_client_message(message)
-
         return hivechat_pb2.StatusResponse(
             success=True,
             status=result["status"],
@@ -120,9 +124,7 @@ class FaultServicer(hivechat_pb2_grpc.FaultServiceServicer):
             "timestamp":   msg_proto.timestamp,
             "origin_node": msg_proto.origin_node,
         }
-
         result = self._node.fault_manager.handle_replica_message(message)
-
         return hivechat_pb2.StatusResponse(
             success=True,
             status=result["status"],
@@ -132,15 +134,19 @@ class FaultServicer(hivechat_pb2_grpc.FaultServiceServicer):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HiveChatNode
+# HiveChatNode – wires all four modules together
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HiveChatNode:
     """
     Main node wrapper for HiveChat.
 
-    Wires the gRPC server together with the Fault Tolerance module.
-    Other modules (Consensus, Replication, Time Sync) plug in here later.
+    Wires all four distributed-system modules together:
+      1. TimeSyncer           – NTP-style clock offset + Lamport clock
+      2. MessageReorderer     – causal delivery buffer (used by ReplicationManager)
+      3. ReplicationManager   – quorum-based message store + vector clocks
+      4. RaftNode             – leader election + log replication → feeds ReplicationManager
+      5. FaultToleranceManager– heartbeat monitoring + persistent SQLite store + retry queue
     """
 
     def __init__(self, node_id: int, port: int, peers: list):
@@ -149,12 +155,50 @@ class HiveChatNode:
         self.address = f"localhost:{port}"
         self.peers   = peers
 
-        # Persistent storage path for this node
+        # ── Persistent storage path ───────────────────────────────────────
         data_dir = PROJECT_ROOT / "node" / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
         store_path = str(data_dir / f"node{self.node_id}_messages.db")
 
-        # ── Fault Tolerance Manager ───────────────────────────────────────
+        # ── 1. Time Synchronization ───────────────────────────────────────
+        # Starts with no reference; updated when Raft elects a leader.
+        print(f"[HiveChat] Initializing Time Synchronization module …")
+        self.time_syncer = TimeSyncer(
+            node_id=self.node_id,
+            reference_addr=None,   # Raft will set this after election
+        )
+        self.reorderer = MessageReorderer()
+
+        # ── 2. Data Replication ───────────────────────────────────────────
+        # Uses TimeSyncer for offset-corrected timestamps and MessageReorderer
+        # for causal delivery ordering.
+        print(f"[HiveChat] Initializing Data Replication module …")
+        cluster_size = len(self.peers) + 1
+        self.replication_manager = ReplicationManager(
+            node_id=self.node_id,
+            peers=self.peers,
+            all_node_ids=list(range(1, cluster_size + 1)),
+            quorum_w=min(2, cluster_size),
+            quorum_r=min(2, cluster_size),
+            consensus=None,          # Raft wired in below
+            time_syncer=self.time_syncer,
+            reorderer=self.reorderer,
+        )
+
+        # ── 3. Raft Consensus ─────────────────────────────────────────────
+        # Peers are wired after all nodes are created via set_raft_peers().
+        # Replication module is registered so committed entries are applied.
+        print(f"[HiveChat] Initializing Raft Consensus module …")
+        self.raft = RaftNode(
+            node_id=self.node_id,
+            peers=[],                # populated via set_raft_peers()
+            replication=self.replication_manager,
+        )
+        # Back-reference: ReplicationManager now knows its consensus module
+        self.replication_manager.consensus = self.raft
+
+        # ── 4. Fault Tolerance Manager ────────────────────────────────────
+        print(f"[HiveChat] Initializing Fault Tolerance module …")
         self.fault_manager = FaultToleranceManager(
             node_id=f"node{self.node_id}",
             peers=self.peers,
@@ -167,17 +211,13 @@ class HiveChatNode:
             missed_threshold=3,        # 3 missed beats → mark DEAD
         )
 
-        # ── gRPC server (created in start()) ─────────────────────────────
+        # ── gRPC server handle ────────────────────────────────────────────
         self._grpc_server = None
 
     # ── gRPC transport helpers ────────────────────────────────────────────
-    # These replace the old placeholders with real RPC calls.
 
     def _heartbeat_peer(self, peer_address: str) -> bool:
-        """
-        Real heartbeat: open a short-lived gRPC channel, call Heartbeat RPC.
-        Returns True only if the peer responds alive=True within timeout.
-        """
+        """Open a short-lived gRPC channel and call the Heartbeat RPC."""
         try:
             with grpc.insecure_channel(peer_address) as channel:
                 stub    = hivechat_pb2_grpc.FaultServiceStub(channel)
@@ -190,10 +230,7 @@ class HiveChatNode:
             return False
 
     def _replicate_to_peer(self, peer_address: str, message: dict) -> bool:
-        """
-        Real replication: open a gRPC channel, call Replicate RPC.
-        Returns True on success.
-        """
+        """Open a gRPC channel and call the Replicate RPC."""
         try:
             with grpc.insecure_channel(peer_address) as channel:
                 stub    = hivechat_pb2_grpc.FaultServiceStub(channel)
@@ -219,9 +256,7 @@ class HiveChatNode:
             return False
 
     def _fetch_messages_from_peer(self, peer_address: str) -> list:
-        """
-        Real recovery fetch: call GetMessages RPC and convert proto → dicts.
-        """
+        """Call GetMessages RPC and convert proto → dicts."""
         try:
             with grpc.insecure_channel(peer_address) as channel:
                 stub    = hivechat_pb2_grpc.MessagingServiceStub(channel)
@@ -249,17 +284,40 @@ class HiveChatNode:
             print(f"[Recovery] FAILED fetching from {peer_address}: {exc}")
             return []
 
+    # ── Raft peer wiring ──────────────────────────────────────────────────
+
+    def set_raft_peers(self, raft_peers: list) -> None:
+        """
+        Wire other RaftNode objects into this node's Raft instance.
+        Call AFTER all nodes have been constructed (multi-node tests /
+        cluster bootstrapper).
+        """
+        self.raft.set_peers(raft_peers)
+
+    def _update_time_sync_reference(self) -> None:
+        """
+        After a leader election, point TimeSyncer at the leader's address
+        so offset estimates stay relative to the authoritative clock.
+        """
+        leader_id = self.raft.get_leader()
+        if leader_id == -1 or not self.peers:
+            return
+        if leader_id == self.node_id:
+            # We are leader — use the first follower as reference
+            self.time_syncer.set_reference(self.peers[0])
+        else:
+            idx = leader_id - 1
+            if 0 <= idx < len(self.peers):
+                self.time_syncer.set_reference(self.peers[idx])
+
     # ── server lifecycle ──────────────────────────────────────────────────
 
     def start(self):
+        print(f"\n[HiveChat] ═══════════════════════════════════════════")
         print(f"[HiveChat] Starting Node {self.node_id} on port {self.port}")
         print(f"[HiveChat] Address : {self.address}")
         print(f"[HiveChat] Peers   : {self.peers or 'None (standalone)'}")
-
-        # ── TODO placeholders for other members ──────────────────────────
-        print("[HiveChat] [TODO] Time Sync module …")
-        print("[HiveChat] [TODO] Consensus (Raft) module …")
-        print("[HiveChat] [TODO] Data Replication module …")
+        print(f"[HiveChat] ═══════════════════════════════════════════\n")
 
         # ── Start gRPC server ─────────────────────────────────────────────
         self._grpc_server = grpc.server(
@@ -273,17 +331,27 @@ class HiveChatNode:
         )
         self._grpc_server.add_insecure_port(f"[::]:{self.port}")
         self._grpc_server.start()
-        print(f"[HiveChat] gRPC server listening on port {self.port}")
+        print(f"[HiveChat] ✓ gRPC server listening on port {self.port}")
+
+        # ── Start Time Synchronization ────────────────────────────────────
+        self.time_syncer.start()
+        print(f"[HiveChat] ✓ Time Synchronization module started")
 
         # ── Start Fault Tolerance ─────────────────────────────────────────
-        print("[HiveChat] Initializing Fault Tolerance module …")
         self.fault_manager.start()
+        print(f"[HiveChat] ✓ Fault Tolerance module started")
 
-        print(f"[HiveChat] Node {self.node_id} is ready.\n")
+        # ── In-process modules are immediately ready ──────────────────────
+        print(f"[HiveChat] ✓ Data Replication module ready "
+              f"(quorum_w={self.replication_manager.quorum_w})")
+        print(f"[HiveChat] ✓ Raft Consensus module ready "
+              f"(state={self.raft.get_state()})")
+        print(f"\n[HiveChat] Node {self.node_id} is FULLY READY.\n")
 
     def stop(self):
         print(f"\n[HiveChat] Shutting down Node {self.node_id} …")
         self.fault_manager.stop()
+        self.time_syncer.stop()
         if self._grpc_server:
             self._grpc_server.stop(grace=5)
         print(f"[HiveChat] Node {self.node_id} stopped.")
@@ -293,7 +361,7 @@ class HiveChatNode:
         if self._grpc_server:
             self._grpc_server.wait_for_termination()
 
-    # ── public helpers (used by demo loop / other modules) ───────────────
+    # ── public helpers ────────────────────────────────────────────────────
 
     def handle_client_message(self, sender: str, receiver: str, content: str) -> dict:
         message = self.fault_manager.build_message(sender, receiver, content)
@@ -309,13 +377,20 @@ class HiveChatNode:
         return self.fault_manager.get_peer_status()
 
     def get_metrics(self):
-        return self.fault_manager.get_metrics()
+        base = self.fault_manager.get_metrics()
+        base["raft_state"]   = self.raft.get_state()
+        base["raft_leader"]  = self.raft.get_leader()
+        base["raft_log_len"] = len(self.raft.log)
+        base["time_sync"]    = self.time_syncer.get_stats()
+        return base
 
     # ── interactive demo loop ─────────────────────────────────────────────
 
     def run_demo_loop(self):
         print("[Demo Mode]  Commands:")
         print("  send <sender> <receiver> <message>")
+        print("  elect    – start Raft leader election on this node")
+        print("  status   – show Raft state + time sync stats")
         print("  metrics | peers | messages | exit\n")
 
         while True:
@@ -334,6 +409,18 @@ class HiveChatNode:
                 elif command == "messages":
                     import json
                     print(json.dumps(self.export_messages(), indent=2))
+                elif command == "elect":
+                    won = self.raft.start_election()
+                    print(f"[Raft] Election: {'WON – I am leader ' if won else 'LOST'}")
+                    self._update_time_sync_reference()
+                elif command == "status":
+                    import json
+                    leader_str = (f"node{self.raft.get_leader()}"
+                                  if self.raft.get_leader() != -1 else "unknown")
+                    print(f"[Raft] State  : {self.raft.get_state()}")
+                    print(f"[Raft] Leader : {leader_str}")
+                    print(f"[Raft] Log    : {len(self.raft.log)} entries")
+                    print(f"[TimeSync]    : {json.dumps(self.time_syncer.get_stats(), indent=2)}")
                 elif command.startswith("send "):
                     parts = command.split(" ", 3)
                     if len(parts) < 4:
