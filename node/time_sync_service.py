@@ -12,6 +12,7 @@ import time
 import logging
 import grpc
 from concurrent import futures
+from typing import Tuple
 
 logger = logging.getLogger("hivechat.time_sync_service")
 
@@ -47,7 +48,7 @@ class TimeSyncServicer(hivechat_pb2_grpc.TimeSyncServiceServicer):
         )
 
 
-def start_sync_server(node_id: int, port: int) -> grpc.Server:
+def start_sync_server(node_id: int, port: int) -> Tuple[grpc.Server, int]:
     """Start a gRPC server that handles TimeSyncService requests.
 
     Parameters
@@ -59,8 +60,10 @@ def start_sync_server(node_id: int, port: int) -> grpc.Server:
 
     Returns
     -------
-    grpc.Server
-        The running server instance (call server.stop() to shut down).
+    tuple
+        `(server, actual_port)` where `server` is the `grpc.Server`
+        instance (call `server.stop()` to shut down) and `actual_port`
+        is the bound port number.
     """
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     servicer = TimeSyncServicer(node_id)
