@@ -90,13 +90,27 @@ hivechat-demo/
 ### Installation
 
 1. Clone the repository and navigate to the project directory.
-2. Install necessary dependencies:
+
+2. Create and activate a Python virtual environment:
+   
+   **Windows:**
+   ```bash
+   python -m venv venv
+   venv\Scripts\activate
+   ```
+   **macOS/Linux:**
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. Install necessary dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. (Optional) Regenerate gRPC stubs if modifications are made to `proto/hivechat.proto`:
+4. (Optional) Regenerate gRPC stubs if modifications are made to `proto/hivechat.proto`:
 
 ```bash
 python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/hivechat.proto
