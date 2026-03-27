@@ -122,7 +122,7 @@ class TestPersistentStore(unittest.TestCase):
         msg    = mgr.build_message("Alice", "Bob", "Hello")
         result = mgr.handle_client_message(msg)
 
-        self.assertEqual(result["status"], "stored")
+        self.assertEqual(result["status"], "stored_and_replicated")
         self.assertEqual(result["replicated_to"], 1)
         self.assertEqual(len(mgr.export_messages()), 1)
         self.assertEqual(len(replica_calls), 1)
@@ -174,8 +174,9 @@ class TestMetrics(unittest.TestCase):
             "node_id", "uptime_seconds", "local_message_count",
             "storage_bytes", "replication_factor",
             "estimated_storage_overhead_multiplier",
-            "pending_queue_total", "per_peer_replication",
-            "missed_heartbeat_counts", "metrics", "peer_status",
+            "pending_queue_total", "per_peer_status",
+            "missed_heartbeat_counts", "internal_metrics", "liveness_status",
+            "system_health"
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
@@ -200,7 +201,7 @@ class TestMetrics(unittest.TestCase):
         mgr.detector._status = {"node2": True, "node3": False}
         mgr.handle_client_message(mgr.build_message("A", "B", "hi"))
 
-        per_peer = mgr.get_metrics()["per_peer_replication"]["node2"]
+        per_peer = mgr.get_metrics()["per_peer_status"]["node2"]
         self.assertEqual(per_peer["successes"], 1)
         self.assertEqual(per_peer["success_rate"], 1.0)
 
