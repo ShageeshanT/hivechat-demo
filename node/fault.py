@@ -319,9 +319,11 @@ class FaultToleranceManager:
         self.peers = peers
         self.replication_factor = max(1, replication_factor)
         
-        # ensure .db extension if passed as .json
-        if store_path.endswith(".json"):
-            store_path = store_path.replace(".json", ".db")
+        # enforce .db extension for the SQLite store
+        store_path = str(store_path)
+        if not store_path.lower().endswith(".db"):
+            base, _ = os.path.splitext(store_path)
+            store_path = f"{base}.db"
             
         self.store = PersistentMessageStore(store_path)
         self._start_time = time.time()
@@ -342,6 +344,8 @@ class FaultToleranceManager:
 
         self._peer_successes: Dict[str, int] = {p: 0 for p in peers}
         self._peer_failures:  Dict[str, int] = {p: 0 for p in peers}
+        self._last_error:    Dict[str, str] = {p: "none" for p in peers}
+        self._last_event_ts: Dict[str, float] = {p: 0.0 for p in peers}
         self._stats_lock = threading.Lock()
 
         self.metrics = {
@@ -389,22 +393,36 @@ class FaultToleranceManager:
         }
 
     def handle_client_message(self, message: Message) -> Dict[str, object]:
+        """
+        Handle a message submitted directly by a client.
+        Ensures local persistence before replicating to cluster.
+        """
         self.metrics["messages_received_from_clients"] += 1
         inserted = self.store.save_message(message)
-        if inserted:
-            self.metrics["messages_stored_locally"] += 1
-        else:
+        
+        if not inserted:
             self.metrics["duplicates_ignored"] += 1
+            return {
+                "status":        "duplicate_ignored",
+                "node_id":       self.node_id,
+                "replicated_to": 0,
+                "message_id":    message["message_id"],
+            }
 
+        self.metrics["messages_stored_locally"] += 1
         replicated_count = self._replicate_to_live_peers(message)
+        
         return {
-            "status":        "stored",
+            "status":        "stored_and_replicated",
             "node_id":       self.node_id,
             "replicated_to": replicated_count,
             "message_id":    message["message_id"],
         }
 
     def handle_replica_message(self, message: Message) -> Dict[str, object]:
+        """
+        Handle a message replica pushed by another node.
+        """
         inserted = self.store.save_message(message)
         if inserted:
             self.metrics["messages_stored_locally"] += 1
@@ -444,16 +462,20 @@ class FaultToleranceManager:
         try:
             ok = self.replicate_fn(peer, message)
             with self._stats_lock:
+                self._last_event_ts[peer] = time.time()
                 if ok:
                     self._peer_successes[peer] = self._peer_successes.get(peer, 0) + 1
                     self.metrics["messages_replicated_to_peers"] += 1
                 else:
                     self._peer_failures[peer] = self._peer_failures.get(peer, 0) + 1
+                    self._last_error[peer] = "peer_refused_rpc"
                     self.metrics["replication_failures"] += 1
             return ok
-        except Exception:
+        except Exception as exc:
             with self._stats_lock:
+                self._last_event_ts[peer] = time.time()
                 self._peer_failures[peer] = self._peer_failures.get(peer, 0) + 1
+                self._last_error[peer] = str(exc)
                 self.metrics["replication_failures"] += 1
             return False
 
@@ -504,10 +526,27 @@ class FaultToleranceManager:
     def get_peer_status(self) -> Dict[str, bool]:
         return self.detector.get_status()
 
+    def check_health(self) -> Dict[str, object]:
+        """Check if the storage and failure detector are operating correctly."""
+        storage_ok = True
+        try:
+            self.store.count()
+        except Exception:
+            storage_ok = False
+
+        detector_ok = self.detector._running
+        
+        return {
+            "status": "healthy" if (storage_ok and detector_ok) else "degraded",
+            "storage_ok": storage_ok,
+            "detector_ok": detector_ok,
+            "node_id": self.node_id
+        }
+
     def get_metrics(self) -> Dict[str, object]:
         local_count   = self.store.count()
         storage_bytes = self.store.size_bytes()
-        uptime        = round(time.time() - self._start_time, 1)
+        uptime        = round(time.time() - self._start_time, 3)
 
         with self._stats_lock:
             per_peer = {}
@@ -515,10 +554,15 @@ class FaultToleranceManager:
                 s = self._peer_successes.get(peer, 0)
                 f = self._peer_failures.get(peer, 0)
                 total = s + f
+                last_time = self._last_event_ts.get(peer, 0)
+                last_ago  = round(time.time() - last_time, 1) if last_time > 0 else None
+                
                 per_peer[peer] = {
                     "successes": s,
                     "failures":  f,
-                    "success_rate": round(s / total, 3) if total else None,
+                    "success_rate": round(s / total, 3) if total else 0.0,
+                    "last_error": self._last_error.get(peer, "none"),
+                    "last_activity_ago_seconds": last_ago
                 }
 
         return {
@@ -530,8 +574,9 @@ class FaultToleranceManager:
             "estimated_storage_overhead_multiplier": self.replication_factor,
             "pending_queue_total":            self.pending_queue.total_pending(),
             "peer_latencies_seconds":         self.detector.get_latencies(),
-            "per_peer_replication":           per_peer,
+            "per_peer_status":                per_peer,
             "missed_heartbeat_counts":        self.detector.get_missed_counts(),
-            "metrics":                        dict(self.metrics),
-            "peer_status":                    self.detector.get_status(),
+            "internal_metrics":               dict(self.metrics),
+            "liveness_status":                self.detector.get_status(),
+            "system_health":                  self.check_health()["status"]
         }
