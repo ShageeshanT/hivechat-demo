@@ -1,31 +1,77 @@
 // HiveChat - Protocol Buffer Definitions
-// Compile with: python -m grpc_tools.protoc -I proto --python_out=. --grpc_python_out=. proto/hivechat.proto
+// Compile with:
+//   python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/hivechat.proto
 
 syntax = "proto3";
 
 package hivechat;
 
-// ── Time Synchronization (Shagee - IT24103322) ─────────────────────────
+// ─────────────────────────────────────────────
+// Shared message types
+// ─────────────────────────────────────────────
 
-// NTP-style time sync request sent by a node to the reference (leader).
-message TimeSyncRequest {
-  int32  node_id          = 1;  // ID of the requesting node
-  double client_send_time = 2;  // client's local time when request was sent
+message ChatMessage {
+  string message_id   = 1;
+  string sender       = 2;
+  string receiver     = 3;
+  string content      = 4;
+  double timestamp    = 5;
+  string origin_node  = 6;
 }
 
-// Response from the reference node with its own timestamp.
-message TimeSyncResponse {
-  double client_send_time = 1;  // echoed back so client can compute RTT
-  double server_time      = 2;  // reference node's local time
-  int32  server_node_id   = 3;  // ID of the reference node
+message StatusResponse {
+  bool   success      = 1;
+  string status       = 2;
+  string message_id   = 3;
+  string node_id      = 4;
 }
 
-// Service for clock offset estimation between nodes.
-service TimeSyncService {
-  // Single round-trip time sync exchange (like NTP).
-  rpc GetTime (TimeSyncRequest) returns (TimeSyncResponse);
+// ─────────────────────────────────────────────
+// MessagingService – client ↔ node
+// ─────────────────────────────────────────────
+
+message SendMessageRequest {
+  ChatMessage message = 1;
 }
 
-// TODO: Define remaining services and messages
-// - MessagingService (SendMessage, GetMessages)
-// - RaftService (RequestVote, AppendEntries)
+message GetMessagesRequest {
+  string node_id = 1;    // which node to pull from
+}
+
+message GetMessagesResponse {
+  repeated ChatMessage messages = 1;
+}
+
+service MessagingService {
+  // Client sends a new chat message to a node
+  rpc SendMessage (SendMessageRequest) returns (StatusResponse);
+
+  // Recovering node pulls all stored messages from a peer
+  rpc GetMessages (GetMessagesRequest) returns (GetMessagesResponse);
+}
+
+// ─────────────────────────────────────────────
+// FaultService – node ↔ node (fault tolerance)
+// ─────────────────────────────────────────────
+
+message HeartbeatRequest {
+  string sender_node_id = 1;
+}
+
+message HeartbeatResponse {
+  bool   alive   = 1;
+  string node_id = 2;
+}
+
+message ReplicateRequest {
+  ChatMessage message       = 1;
+  string      source_node_id = 2;
+}
+
+service FaultService {
+  // Liveness probe between nodes
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Primary node pushes a replica to a peer
+  rpc Replicate (ReplicateRequest) returns (StatusResponse);
+}

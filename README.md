@@ -52,32 +52,58 @@ hivechat/
 
 ## Setup
 
+1. **Install Dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Generate gRPC Stubs (optional):**
+   *(The project already includes generated stubs in `proto/`, but you can regenerate them if you change `hivechat.proto`)*
+   ```bash
+   python -m grpc_tools.protoc -I proto --python_out=proto --grpc_python_out=proto proto/hivechat.proto
+   ```
+
+## Running a Fault-Tolerant Cluster
+
+To test liveness, replication, and failover, start a cluster of 3 nodes:
+
+1. **Start Node 1 (port 5001):**
+   ```bash
+   # Demo mode allows interactive testing of metrics and messages
+   python node/server.py --node-id 1 --port 5001 --demo
+   ```
+
+2. **Start Node 2 (port 5002 - connected to Node 1):**
+   ```bash
+   python node/server.py --node-id 2 --port 5002 --peers localhost:5001 --demo
+   ```
+
+3. **Start Node 3 (port 5003 - connected to Node 1 and 2):**
+   ```bash
+   python node/server.py --node-id 3 --port 5003 --peers localhost:5001,localhost:5002 --demo
+   ```
+
+## Client usage with Failover
+
+The client automatically tries the next server if the primary one is down.
+
 ```bash
-pip install -r requirements.txt
+# Provide all server addresses for failover support
+python client/client.py --user Sihan --servers localhost:5001,localhost:5002,localhost:5003
 ```
 
-## Running
+- Try killing a node (e.g., Node 1) and see the client automatically deliver through Node 2.
+- Type `/inbox` to see messages received for your user.
+- Type `metrics` in a server window to see the replication status and storage overhead.
 
-Start a cluster of nodes:
-```bash
-python node/server.py --node-id 1 --port 5001
-python node/server.py --node-id 2 --port 5002
-python node/server.py --node-id 3 --port 5003
-```
+## Fault Tolerance (Member 2 Features)
 
-Send messages via client:
-```bash
-python client/client.py --server localhost:5001
-```
-
-## Team Members
-
-| Member   | Name    | Reg. No   |       Role            |
-|----------|---------|-----------|-----------------------|
-| Member 1 | Maheesha| IT24103477| Data Replication       |
-| Member 2 | Sihan   | IT24103532| Fault Tolerance       |
-| Member 3 | Shagee  | IT24103322| Time Synchronization  |
-| Member 4 | Gunitha | IT24610787| Consensus & Agreement |
+As the Fault Tolerance member (Sihan, IT24103532), I've implemented:
+- **Persistent Message Store:** Messages are saved in JSON files with `message_id` deduplication.
+- **Failure Detection:** Standard threshold-based heartbeat detector (marks a node dead if 3 pings fail).
+- **Automatic Recovery:** When a node rejoins, it fetches missing history from its peers.
+- **Pending Replication Queue:** Messages that fail to replicate while a peer is down are queued and automatically pushed once the peer recovers.
+- **Redundancy Metrics:** Tracks per-peer replication success rates and storage overhead.
 
 ## License
 
