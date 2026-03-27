@@ -411,7 +411,7 @@ class HiveChatNode:
                     print(json.dumps(self.export_messages(), indent=2))
                 elif command == "elect":
                     won = self.raft.start_election()
-                    print(f"[Raft] Election: {'WON – I am leader 👑' if won else 'LOST'}")
+                    print(f"[Raft] Election: {'WON – I am leader ' if won else 'LOST'}")
                     self._update_time_sync_reference()
                 elif command == "status":
                     import json
