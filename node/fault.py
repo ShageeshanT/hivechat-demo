@@ -156,6 +156,22 @@ class PersistentMessageStore:
         except Exception:
             pass
 
+    def prune_system_logs(self, keep_limit: int = 100) -> None:
+        """Keep the system_log table from growing indefinitely."""
+        try:
+            with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                with conn:
+                    conn.execute("""
+                        DELETE FROM system_log 
+                        WHERE rowid NOT IN (
+                            SELECT rowid FROM system_log 
+                            ORDER BY timestamp DESC 
+                            LIMIT ?
+                        )
+                    """, (keep_limit,))
+        except Exception:
+            pass
+
     def get_recent_logs(self, limit: int = 5) -> List[Dict[str, object]]:
         try:
             with self.lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
@@ -433,14 +449,20 @@ class FaultToleranceManager:
         content: str,
         timestamp: Optional[float] = None,
     ) -> Message:
-        return {
+        msg = {
             "message_id":   str(uuid.uuid4()),
-            "sender":       sender,
-            "receiver":     receiver,
-            "content":      content,
-            "timestamp":    timestamp if timestamp is not None else time.time(),
-            "origin_node":  self.node_id,
+            "sender":       str(sender),
+            "receiver":     str(receiver),
+            "content":      str(content),
+            "timestamp":    float(timestamp if timestamp is not None else time.time()),
+            "origin_node":  str(self.node_id),
         }
+        return msg
+
+    def _validate_message(self, message: Message) -> bool:
+        """Ensure message has all required fields and correct types."""
+        required = ["message_id", "sender", "receiver", "content", "timestamp", "origin_node"]
+        return all(k in message for k in required) and len(str(message.get("message_id", ""))) > 0
 
     def handle_client_message(self, message: Message) -> Dict[str, object]:
         """
@@ -448,6 +470,14 @@ class FaultToleranceManager:
         Ensures local persistence before replicating to cluster.
         """
         self.metrics["messages_received_from_clients"] += 1
+        
+        if not self._validate_message(message):
+            return {
+                "status": "invalid_message_format",
+                "node_id": self.node_id,
+                "message_id": message.get("message_id", "unknown")
+            }
+
         inserted = self.store.save_message(message)
         
         if not inserted:
@@ -473,6 +503,9 @@ class FaultToleranceManager:
         """
         Handle a message replica pushed by another node.
         """
+        if not self._validate_message(message):
+             return {"status": "invalid_replica", "node_id": self.node_id}
+
         inserted = self.store.save_message(message)
         if inserted:
             self.metrics["messages_stored_locally"] += 1
@@ -562,6 +595,9 @@ class FaultToleranceManager:
                         with self._stats_lock:
                             self.metrics["pending_retried"] += retried
                         logger.info(f"Background Sync: Peer {peer} received {retried} queued message(s).")
+            
+            # Periodic self-maintenance
+            self.store.prune_system_logs(100)
             time.sleep(5.0)
 
     def _on_peer_recovered(self, peer: str) -> None:
