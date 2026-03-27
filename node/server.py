@@ -367,6 +367,12 @@ def parse_args():
         "--demo", action="store_true",
         help="Run interactive demo loop instead of blocking on gRPC"
     )
+    parser.add_argument(
+        "--sync-port",
+        type=int,
+        default=0,
+        help="Port for the TimeSyncService gRPC server (default: port + 1000)",
+    )
     return parser.parse_args()
 
 
