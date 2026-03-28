@@ -31,3 +31,26 @@ def get_client(username, servers_list):
         logger.info(f"Creating new HiveChatClient for {username} with servers {servers_list}")
         clients[key] = HiveChatClient(username, servers_list)
     return clients[key]
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+@app.route("/api/send", methods=["POST"])
+def send_message():
+    data = request.json
+    username = data.get("username")
+    recipient = data.get("recipient")
+    content = data.get("content")
+    servers = data.get("servers", ["localhost:5001", "localhost:5002", "localhost:5003"])
+    
+    if not username or not recipient or not content:
+        return jsonify({"error": "Missing username, recipient, or content parameters"}), 400
+        
+    client = get_client(username, servers)
+    try:
+        result = client.send_with_failover(recipient, content)
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        logger.error(f"Error sending message: {str(e)}")
+        return jsonify({"error": str(e)}), 500
