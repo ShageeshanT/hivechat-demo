@@ -408,7 +408,282 @@
 
 <body>
 
+    <!-- Login Screen -->
+    <div id="login-screen" class="glass">
+        <div class="logo">HiveChat</div>
+        <p class="subtitle">Distributed Messaging System</p>
 
+        <div class="input-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" placeholder="Enter your name" autocomplete="off">
+        </div>
+
+        <div class="input-group">
+            <label for="servers">Servers (comma separated)</label>
+            <input type="text" id="servers" value="localhost:5001, localhost:5002, localhost:5003">
+        </div>
+
+        <button class="btn-primary" onclick="login()">
+            Enter Chat
+        </button>
+    </div>
+
+    <!-- Main App -->
+    <div id="app-container" class="glass">
+        <!-- Sidebar: User Info & Send Message -->
+        <div class="sidebar">
+            <div class="user-profile">
+                <div class="avatar" id="user-avatar">?</div>
+                <div class="user-info">
+                    <h2 id="display-name">User</h2>
+                    <div class="status">
+                        <i class="fas fa-circle"></i> Online
+                    </div>
+                </div>
+            </div>
+
+            <div class="new-message-form">
+                <h3>Send Message</h3>
+                <div class="input-group">
+                    <label>Recipient:</label>
+                    <input type="text" id="msg-recipient" placeholder="Recipient's username">
+                </div>
+                <div class="input-group">
+                    <label>Message Content:</label>
+                    <textarea id="msg-content" placeholder="Write your message here..."></textarea>
+                </div>
+                <button class="btn-primary" id="btn-send" onclick="sendMessage()">
+                    <span>Send Message</span>
+                    <i class="fas fa-paper-plane loading-icon"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Chat Area: Inbox -->
+        <div class="chat-area">
+            <div class="chat-header">
+                <h2><i class="fas fa-inbox"></i> Inbox</h2>
+                <button class="refresh-btn" onclick="fetchMessages()" title="Refresh Inbox">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+            <div class="messages-container" id="messages-list">
+                <!-- Messages will be injected here -->
+                <div class="empty-state">
+                    <i class="fas fa-envelope-open-text"></i>
+                    <p>No messages yet.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <i class="fas fa-info-circle"></i>
+        <span id="toast-msg">Notification</span>
+    </div>
+
+    <script>
+        // State
+        let currentUser = '';
+        let currentServers = [];
+        let pollingInterval = null;
+
+        // Elements
+        const loginScreen = document.getElementById('login-screen');
+        const appContainer = document.getElementById('app-container');
+        const usernameInput = document.getElementById('username');
+        const serversInput = document.getElementById('servers');
+        const displayAvatar = document.getElementById('user-avatar');
+        const displayName = document.getElementById('display-name');
+
+        // Login
+        function login() {
+            const user = usernameInput.value.trim();
+            const srvs = serversInput.value.trim();
+
+            if (!user) {
+                showToast('Please enter a username', 'error');
+                return;
+            }
+
+            currentUser = user;
+            currentServers = srvs.split(',').map(s => s.trim()).filter(s => s);
+
+            // Update UI
+            displayAvatar.textContent = user.charAt(0).toUpperCase();
+            displayName.textContent = user;
+
+            loginScreen.style.display = 'none';
+            appContainer.style.display = 'grid';
+
+            // Initial fetch
+            fetchMessages();
+
+            // Start polling every 3 seconds
+            pollingInterval = setInterval(fetchMessages, 3000);
+        }
+
+        // Send Message
+        async function sendMessage() {
+            const recipient = document.getElementById('msg-recipient').value.trim();
+            const content = document.getElementById('msg-content').value.trim();
+            const btn = document.getElementById('btn-send');
+            const icon = btn.querySelector('.loading-icon');
+
+            if (!recipient || !content) {
+                showToast('Recipient and content are required', 'error');
+                return;
+            }
+
+            btn.disabled = true;
+            icon.classList.remove('fa-paper-plane');
+            icon.classList.add('fa-spinner', 'fa-spin');
+            icon.style.display = 'inline-block';
+
+            try {
+                const response = await fetch('/api/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: currentUser,
+                        recipient: recipient,
+                        content: content,
+                        servers: currentServers
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showToast('Message sent successfully!', 'success');
+                    document.getElementById('msg-content').value = '';
+                    fetchMessages(); // refresh instantly
+                } else {
+                    showToast(`Error: ${data.error || 'Failed to send'}`, 'error');
+                }
+            } catch (err) {
+                showToast(`Network error: ${err.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+                icon.classList.remove('fa-spinner', 'fa-spin');
+                icon.classList.add('fa-paper-plane');
+                icon.style.display = 'none';
+            }
+        }
+
+        // Fetch Messages
+        async function fetchMessages() {
+            const refreshBtn = document.querySelector('.refresh-btn');
+            refreshBtn.classList.add('refreshing');
+
+            try {
+                const queryParams = new URLSearchParams({
+                    username: currentUser,
+                    servers: currentServers.join(',')
+                });
+
+                const response = await fetch(`/api/messages?${queryParams.toString()}`);
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    renderMessages(data.messages);
+                } else {
+                    console.error('Failed to fetch messages:', data.error);
+                }
+            } catch (err) {
+                console.error('Network error while fetching messages:', err);
+            } finally {
+                setTimeout(() => {
+                    refreshBtn.classList.remove('refreshing');
+                }, 500); // Minimum spin time for feedback
+            }
+        }
+
+        // Render Messages
+        function renderMessages(messages) {
+            const container = document.getElementById('messages-list');
+
+            if (!messages || messages.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <i class="fas fa-inbox"></i>
+                        <p>Your inbox is empty</p>
+                    </div>`;
+                return;
+            }
+
+            // We only re-render completely for simplicity
+            container.innerHTML = '';
+
+            // Format time
+            const formatTime = (ts) => {
+                const d = new Date(ts * 1000);
+                return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            };
+
+            // Order messages (newest first for UI, or oldest first if preferred)
+            // Backend sorts by oldest first. Let's show newest at top.
+            const reversed = [...messages].reverse();
+
+            reversed.forEach(msg => {
+                const card = document.createElement('div');
+                card.className = 'message-card';
+                card.innerHTML = `
+                    <div class="msg-header">
+                        <span class="msg-sender"><i class="fas fa-user-circle"></i> ${msg.sender}</span>
+                        <span class="msg-time">${formatTime(msg.timestamp)}</span>
+                    </div>
+                    <div class="msg-content">${escapeHTML(msg.content)}</div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        // Utils
+        function escapeHTML(str) {
+            return str.replace(/[&<>'"]/g,
+                tag => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    "'": '&#39;',
+                    '"': '&quot;'
+                }[tag])
+            );
+        }
+
+        let toastTimeout;
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            const msgEl = document.getElementById('toast-msg');
+            const icon = toast.querySelector('i');
+
+            toast.className = 'toast'; // reset
+            toast.classList.add(type);
+            msgEl.textContent = message;
+
+            if (type === 'success') {
+                icon.className = 'fas fa-check-circle';
+            } else if (type === 'error') {
+                icon.className = 'fas fa-exclamation-circle';
+            } else {
+                icon.className = 'fas fa-info-circle';
+            }
+
+            toast.classList.add('show');
+
+            clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        // Handle enter key in login
+        usernameInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') login();
+        });
+    </script>
 </body>
 
 </html>
