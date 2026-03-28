@@ -194,6 +194,45 @@ def heartbeat():
     return jsonify({"success": True})
 
 
+@app.route("/api/server-status", methods=["GET"])
+def server_status():
+    """Check which cluster servers are alive by attempting a gRPC heartbeat."""
+    import grpc
+    from proto import hivechat_pb2, hivechat_pb2_grpc
+
+    servers_param = request.args.get("servers", "localhost:5001,localhost:5002,localhost:5003")
+    servers = [s.strip() for s in servers_param.split(",") if s.strip()]
+
+    results = []
+    for server in servers:
+        alive = False
+        latency_ms = None
+        try:
+            start = time.time()
+            with grpc.insecure_channel(server) as channel:
+                stub = hivechat_pb2_grpc.FaultServiceStub(channel)
+                req = hivechat_pb2.HeartbeatRequest(sender_node_id="web_client")
+                resp = stub.Heartbeat(req, timeout=2.0)
+                alive = resp.alive
+                latency_ms = round((time.time() - start) * 1000, 1)
+        except Exception:
+            alive = False
+
+        results.append({
+            "address": server,
+            "alive": alive,
+            "latency_ms": latency_ms,
+        })
+
+    alive_count = sum(1 for r in results if r["alive"])
+    return jsonify({
+        "success": True,
+        "servers": results,
+        "alive_count": alive_count,
+        "total_count": len(results),
+    })
+
+
 if __name__ == "__main__":
     logger.info("Starting HiveChat Web Interface on http://localhost:8000")
     app.run(host="0.0.0.0", port=8000, debug=True)

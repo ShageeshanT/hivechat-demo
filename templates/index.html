@@ -361,6 +361,46 @@
             .messages-area { padding: 16px 16px; }
         }
 
+        /* ========== Server Status Bar ========== */
+        .server-bar {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 16px;
+            background: rgba(0,0,0,0.25);
+            border-top: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .server-bar-label {
+            font-size: 0.7rem; color: var(--text-secondary);
+            text-transform: uppercase; letter-spacing: 0.5px;
+            font-weight: 600; margin-right: 4px; white-space: nowrap;
+        }
+        .server-nodes { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+        .server-node {
+            display: flex; align-items: center; gap: 5px;
+            padding: 3px 10px; border-radius: 12px;
+            font-size: 0.72rem; font-weight: 500;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border);
+            transition: all var(--transition);
+        }
+        .server-node .srv-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            flex-shrink: 0; transition: background var(--transition);
+        }
+        .server-node.alive .srv-dot { background: var(--online-green); box-shadow: 0 0 6px rgba(77,205,94,0.5); }
+        .server-node.dead .srv-dot { background: var(--danger); box-shadow: 0 0 6px rgba(239,83,80,0.4); }
+        .server-node.alive { border-color: rgba(77,205,94,0.15); }
+        .server-node.dead { border-color: rgba(239,83,80,0.15); opacity: 0.7; }
+        .server-node .srv-label { color: var(--text-secondary); }
+        .server-node .srv-ping { color: var(--text-time); font-size: 0.65rem; }
+        .server-summary {
+            font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+            padding: 3px 8px; border-radius: 10px;
+        }
+        .server-summary.all-good { color: var(--online-green); background: rgba(77,205,94,0.1); }
+        .server-summary.partial { color: #f59e0b; background: rgba(245,158,11,0.1); }
+        .server-summary.all-down { color: var(--danger); background: rgba(239,83,80,0.1); }
+
         /* Avatar color palette */
         .avatar-c0 { background: linear-gradient(135deg, #f59e0b, #f97316); }
         .avatar-c1 { background: linear-gradient(135deg, #ec4899, #f43f5e); }
@@ -420,6 +460,13 @@
                 <p>No other users online yet.<br>Open another tab and log in!</p>
             </div>
         </div>
+        <div class="server-bar" id="server-bar">
+            <span class="server-bar-label"><i class="fas fa-server"></i> Cluster</span>
+            <div class="server-nodes" id="server-nodes">
+                <span style="font-size:0.75rem;color:var(--text-secondary)">Checking...</span>
+            </div>
+            <span class="server-summary" id="server-summary"></span>
+        </div>
     </div>
 
     <!-- Chat Area -->
@@ -468,6 +515,7 @@ let knownUsers = [];
 let pollMsgInterval = null;
 let pollUsersInterval = null;
 let heartbeatInterval = null;
+let serverStatusInterval = null;
 
 // ==================== ELEMENTS ====================
 const $login = document.getElementById('login-screen');
@@ -541,12 +589,15 @@ function login() {
     pollUsersInterval = setInterval(fetchUsers, 4000);
     pollMsgInterval = setInterval(fetchAllMessages, 2000);
     heartbeatInterval = setInterval(sendHeartbeat, 10000);
+    fetchServerStatus();
+    serverStatusInterval = setInterval(fetchServerStatus, 5000);
 }
 
 function logout() {
     clearInterval(pollMsgInterval);
     clearInterval(pollUsersInterval);
     clearInterval(heartbeatInterval);
+    clearInterval(serverStatusInterval);
     currentUser = ''; selectedUser = null; allMessages = []; knownUsers = [];
     $app.classList.remove('active', 'chat-open');
     $login.style.display = 'flex';
@@ -779,6 +830,45 @@ async function sendMessage() {
     } finally {
         $sendBtn.classList.remove('sending');
         $msgInput.focus();
+    }
+}
+
+// ==================== SERVER STATUS ====================
+async function fetchServerStatus() {
+    try {
+        const params = new URLSearchParams({ servers: currentServers.join(',') });
+        const resp = await fetch('/api/server-status?' + params);
+        const data = await resp.json();
+        if (data.success) renderServerStatus(data);
+    } catch (e) { /* silent */ }
+}
+
+function renderServerStatus(data) {
+    const $nodes = document.getElementById('server-nodes');
+    const $summary = document.getElementById('server-summary');
+
+    $nodes.innerHTML = data.servers.map(s => {
+        const status = s.alive ? 'alive' : 'dead';
+        const port = s.address.split(':')[1] || s.address;
+        const ping = s.alive && s.latency_ms != null ? `${s.latency_ms}ms` : '';
+        return `<div class="server-node ${status}">
+            <span class="srv-dot"></span>
+            <span class="srv-label">:${esc(port)}</span>
+            ${ping ? `<span class="srv-ping">${ping}</span>` : ''}
+        </div>`;
+    }).join('');
+
+    const alive = data.alive_count;
+    const total = data.total_count;
+    if (alive === total) {
+        $summary.textContent = `${alive}/${total}`;
+        $summary.className = 'server-summary all-good';
+    } else if (alive > 0) {
+        $summary.textContent = `${alive}/${total}`;
+        $summary.className = 'server-summary partial';
+    } else {
+        $summary.textContent = `0/${total}`;
+        $summary.className = 'server-summary all-down';
     }
 }
 </script>
