@@ -54,3 +54,26 @@ def send_message():
     except Exception as e:
         logger.error(f"Error sending message: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/messages", methods=["GET"])
+def get_messages():
+    username = request.args.get("username")
+    servers_param = request.args.get("servers", "localhost:5001,localhost:5002,localhost:5003")
+    servers = [s.strip() for s in servers_param.split(",") if s.strip()]
+    
+    if not username:
+        return jsonify({"error": "Username required"}), 400
+        
+    client = get_client(username, servers)
+    try:
+        messages = client.receive_messages()
+        # Sort messages by timestamp
+        messages.sort(key=lambda x: x.get('timestamp', 0))
+        return jsonify({"success": True, "messages": messages})
+    except Exception as e:
+        logger.error(f"Error fetching messages: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    logger.info("Starting HiveChat Web Interface on http://localhost:8000")
+    app.run(host="0.0.0.0", port=8000, debug=True)
