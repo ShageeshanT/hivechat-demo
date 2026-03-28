@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HiveChat Web</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --surface: rgba(20, 26, 39, 0.7);
+            --surface-hover: rgba(30, 41, 59, 0.9);
+            --primary: #8b5cf6;
+            --primary-hover: #7c3aed;
+            --secondary: #ec4899;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: rgba(255, 255, 255, 0.08);
+            --accent-glow: rgba(139, 92, 246, 0.2);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-image:
+                radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.15) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.15) 0%, transparent 20%);
+            overflow: hidden;
+        }
+
+        .glass {
+            background: var(--surface);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+        }
+
+        /* --- Login Screen --- */
+        #login-screen {
+            width: 100%;
+            max-width: 400px;
+            padding: 40px;
+            text-align: center;
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+
+        .logo {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: inline-block;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            margin-bottom: 30px;
+            font-size: 0.95rem;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+            text-align: left;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        input {
+            width: 100%;
+            padding: 14px 16px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            color: var(--text-main);
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        button.btn-primary {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-hover));
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px var(--accent-glow);
+        }
+
+        button.btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(139, 92, 246, 0.4);
+        }
+
+        /* --- Main App Container --- */
+        #app-container {
+            display: none;
+            width: 90%;
+            max-width: 1200px;
+            height: 90vh;
+            display: none;
+            /* hidden initially */
+            grid-template-columns: 350px 1fr;
+            gap: 20px;
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+        }
+
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #f59e0b, #ec4899);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+
+        .user-info h2 {
+            font-size: 1.2rem;
+            font-weight: 600;
+        }
+
+        .status {
+            font-size: 0.8rem;
+            color: #10b981;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .status i {
+            font-size: 0.6rem;
+        }
+
+        .new-message-form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            flex-grow: 1;
+        }
+
+        .new-message-form h3 {
+            font-size: 1rem;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 120px;
+            padding: 14px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            color: var(--text-main);
+            font-family: inherit;
+            resize: none;
+            transition: all 0.3s ease;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        .loading-icon {
+            display: none;
+            margin-left: 10px;
+        }
+
+        button:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        /* Chat Area */
+        .chat-area {
+            display: flex;
+            flex-direction: column;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-header h2 {
+            font-size: 1.2rem;
+        }
+
+        .refresh-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .refresh-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .refreshing i {
+            animation: spin 1s infinite linear;
+        }
+
+        .messages-container {
+            flex-grow: 1;
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .messages-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .messages-container::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+
+        .message-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-left: 4px solid var(--primary);
+            padding: 16px;
+            border-radius: 8px 12px 12px 8px;
+            animation: slideIn 0.3s ease-out forwards;
+        }
+
+        .msg-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+        }
+
+        .msg-sender {
+            font-weight: 600;
+            color: var(--primary);
+        }
+
+        .msg-time {
+            color: var(--text-muted);
+        }
+
+        .msg-content {
+            font-size: 1rem;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        .empty-state {
+            margin: auto;
+            text-align: center;
+            color: var(--text-muted);
+        }
+
+        .empty-state i {
+            font-size: 3rem;
+            margin-bottom: 15px;
+            opacity: 0.5;
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        @keyframes spin {
+            from {
+                transform: rotate(0deg);
+            }
+
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Notifications */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: var(--surface);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            padding: 15px 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.27, 1.55);
+            z-index: 1000;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast.success i {
+            color: #10b981;
+        }
+
+        .toast.error i {
+            color: #ef4444;
+        }
+
+        @media (max-width: 800px) {
+            #app-container {
+                grid-template-columns: 1fr;
+                height: 100%;
+                width: 100%;
+                border-radius: 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Login Screen -->
+    <div id="login-screen" class="glass">
+        <div class="logo">HiveChat</div>
+        <p class="subtitle">Distributed Messaging System</p>
+
+        <div class="input-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" placeholder="Enter your name" autocomplete="off">
+        </div>
+
+        <div class="input-group">
+            <label for="servers">Servers (comma separated)</label>
+            <input type="text" id="servers" value="localhost:5001, localhost:5002, localhost:5003">
+        </div>
+
+        <button class="btn-primary" onclick="login()">
+            Enter Chat
+        </button>
+    </div>
+
+    <!-- Main App -->
+    <div id="app-container" class="glass">
+        <!-- Sidebar: User Info & Send Message -->
+        <div class="sidebar">
+            <div class="user-profile">
+                <div class="avatar" id="user-avatar">?</div>
+                <div class="user-info">
+                    <h2 id="display-name">User</h2>
+                    <div class="status">
+                        <i class="fas fa-circle"></i> Online
+                    </div>
+                </div>
+            </div>
+
+            <div class="new-message-form">
+                <h3>Send Message</h3>
+                <div class="input-group">
+                    <label>Recipient:</label>
+                    <input type="text" id="msg-recipient" placeholder="Recipient's username">
+                </div>
+                <div class="input-group">
+                    <label>Message Content:</label>
+                    <textarea id="msg-content" placeholder="Write your message here..."></textarea>
+                </div>
+                <button class="btn-primary" id="btn-send" onclick="sendMessage()">
+                    <span>Send Message</span>
+                    <i class="fas fa-paper-plane loading-icon"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Chat Area: Inbox -->
+        <div class="chat-area">
+            <div class="chat-header">
+                <h2><i class="fas fa-inbox"></i> Inbox</h2>
+                <button class="refresh-btn" onclick="fetchMessages()" title="Refresh Inbox">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+            <div class="messages-container" id="messages-list">
+                <!-- Messages will be injected here -->
+                <div class="empty-state">
+                    <i class="fas fa-envelope-open-text"></i>
+                    <p>No messages yet.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <i class="fas fa-info-circle"></i>
+        <span id="toast-msg">Notification</span>
+    </div>
+
+    <script>
+        // State
+        let currentUser = '';
+        let currentServers = [];
+        let pollingInterval = null;
+
+        // Elements
+        const loginScreen = document.getElementById('login-screen');
+        const appContainer = document.getElementById('app-container');
+        const usernameInput = document.getElementById('username');
+        const serversInput = document.getElementById('servers');
+        const displayAvatar = document.getElementById('user-avatar');
+        const displayName = document.getElementById('display-name');
+
+        // Login
+        function login() {
+            const user = usernameInput.value.trim();
+            const srvs = serversInput.value.trim();
+
+            if (!user) {
+                showToast('Please enter a username', 'error');
+                return;
+            }
+
+            currentUser = user;
+            currentServers = srvs.split(',').map(s => s.trim()).filter(s => s);
+
+            // Update UI
+            displayAvatar.textContent = user.charAt(0).toUpperCase();
+            displayName.textContent = user;
+
+            loginScreen.style.display = 'none';
+            appContainer.style.display = 'grid';
+
+            // Initial fetch
+            fetchMessages();
+
+            // Start polling every 3 seconds
+            pollingInterval = setInterval(fetchMessages, 3000);
+        }
+
+        // Send Message
+        async function sendMessage() {
+            const recipient = document.getElementById('msg-recipient').value.trim();
+            const content = document.getElementById('msg-content').value.trim();
+            const btn = document.getElementById('btn-send');
+            const icon = btn.querySelector('.loading-icon');
+
+            if (!recipient || !content) {
+                showToast('Recipient and content are required', 'error');
+                return;
+            }
+
+            btn.disabled = true;
+            icon.classList.remove('fa-paper-plane');
+            icon.classList.add('fa-spinner', 'fa-spin');
+            icon.style.display = 'inline-block';
+
+            try {
+                const response = await fetch('/api/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: currentUser,
+                        recipient: recipient,
+                        content: content,
+                        servers: currentServers
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showToast('Message sent successfully!', 'success');
+                    document.getElementById('msg-content').value = '';
+                    fetchMessages(); // refresh instantly
+                } else {
+                    showToast(`Error: ${data.error || 'Failed to send'}`, 'error');
+                }
+            } catch (err) {
+                showToast(`Network error: ${err.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+                icon.classList.remove('fa-spinner', 'fa-spin');
+                icon.classList.add('fa-paper-plane');
+                icon.style.display = 'none';
+            }
+        }
+
+        // Fetch Messages
+        async function fetchMessages() {
+            const refreshBtn = document.querySelector('.refresh-btn');
+            refreshBtn.classList.add('refreshing');
+
+            try {
+                const queryParams = new URLSearchParams({
+                    username: currentUser,
+                    servers: currentServers.join(',')
+                });
+
+                const response = await fetch(`/api/messages?${queryParams.toString()}`);
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    renderMessages(data.messages);
+                } else {
+                    console.error('Failed to fetch messages:', data.error);
+                }
+            } catch (err) {
+                console.error('Network error while fetching messages:', err);
+            } finally {
+                setTimeout(() => {
+                    refreshBtn.classList.remove('refreshing');
+                }, 500); // Minimum spin time for feedback
+            }
+        }
+
+        // Render Messages
+        function renderMessages(messages) {
+            const container = document.getElementById('messages-list');
+
+            if (!messages || messages.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <i class="fas fa-inbox"></i>
+                        <p>Your inbox is empty</p>
+                    </div>`;
+                return;
+            }
+
+            // We only re-render completely for simplicity
+            container.innerHTML = '';
+
+            // Format time
+            const formatTime = (ts) => {
+                const d = new Date(ts * 1000);
+                return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            };
+
+            // Order messages (newest first for UI, or oldest first if preferred)
+            // Backend sorts by oldest first. Let's show newest at top.
+            const reversed = [...messages].reverse();
+
+            reversed.forEach(msg => {
+                const card = document.createElement('div');
+                card.className = 'message-card';
+                card.innerHTML = `
+                    <div class="msg-header">
+                        <span class="msg-sender"><i class="fas fa-user-circle"></i> ${msg.sender}</span>
+                        <span class="msg-time">${formatTime(msg.timestamp)}</span>
+                    </div>
+                    <div class="msg-content">${escapeHTML(msg.content)}</div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        // Utils
+        function escapeHTML(str) {
+            return str.replace(/[&<>'"]/g,
+                tag => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    "'": '&#39;',
+                    '"': '&quot;'
+                }[tag])
+            );
+        }
+
+        let toastTimeout;
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            const msgEl = document.getElementById('toast-msg');
+            const icon = toast.querySelector('i');
+
+            toast.className = 'toast'; // reset
+            toast.classList.add(type);
+            msgEl.textContent = message;
+
+            if (type === 'success') {
+                icon.className = 'fas fa-check-circle';
+            } else if (type === 'error') {
+                icon.className = 'fas fa-exclamation-circle';
+            } else {
+                icon.className = 'fas fa-info-circle';
+            }
+
+            toast.classList.add('show');
+
+            clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        // Handle enter key in login
+        usernameInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') login();
+        });
+    </script>
+</body>
+
+</html>
