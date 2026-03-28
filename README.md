@@ -77,7 +77,10 @@ hivechat-demo/
 │   └── fault.py        # Failure detection and node recovery logic
 ├── client/             # User-facing application
 │   └── client.py       # gRPC client with built-in failover capabilities
+├── templates/          # Web UI HTML templates
+│   └── index.html      # Premium glassmorphism frontend
 ├── tests/              # Automated integration and unit tests
+├── web_client.py       # Flask REST API and web server proxy
 └── requirements.txt    # Python dependencies
 ```
 
@@ -145,7 +148,23 @@ The `--demo` flag enables a rich interactive shell on each server. Available com
 
 ## Interacting with the Network
 
-The client application includes sophisticated failover routing. If the primary node crashes, the client automatically re-routes the operation to the next healthy node in the list.
+You can interact with the cluster either through the terminal CLI client or the graphical Web UI. Both clients include sophisticated failover routing out-of-the-box.
+
+### Option 1: The Graphical Web UI (Recommended)
+
+A premium, modern Web UI built with Flask to visualize the messaging system seamlessly.
+
+**1. Launch the Web Server:**
+```bash
+python web_client.py
+```
+**2. Open your Browser:** Navigate to `http://localhost:8000`.
+**3. Login:** Enter your username (e.g., `Alice`) and ensure your cluster addresses are set to `localhost:5001, localhost:5002, localhost:5003`.
+**4. Chat:** Send messages and watch your inbox automatically poll and update in real-time. If a backend node fails, the frontend smoothly re-routes operations through backup nodes!
+
+### Option 2: The Command Line Client
+
+If the primary node crashes, the traditional CLI client automatically re-routes the operation to the next healthy node in the list.
 
 **Launch the Client:**
 ```bash
