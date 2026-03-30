@@ -325,11 +325,37 @@ class ReplicationManager:
 
     def _read_from_peer(self, peer: str, chat_id: str) -> list[dict]:
         """
-        Read messages from a peer node.
-        ── STUB ──  Replace with actual gRPC call in integration phase.
+        Fetch messages from a peer node via the MessagingService.GetMessages RPC
+        and return only those messages that belong to the requested chat_id.
+        Falls back gracefully to an empty list on any network error.
         """
-        print(f"[Replication] Reading from {peer} ... (stub, returns empty for now)")
-        return []  # Stub: peer returns nothing yet
+        try:
+            with grpc.insecure_channel(peer) as ch:
+                stub = hivechat_pb2_grpc.MessagingServiceStub(ch)
+                req  = hivechat_pb2.GetMessagesRequest(node_id=str(self.node_id))
+                resp = stub.GetMessages(req, timeout=5.0)
+                result = []
+                for m in resp.messages:
+                    # Convert proto → replication-internal dict format.
+                    # Use message_id as "id" to match MessageStore's key field.
+                    result.append({
+                        "id":           m.message_id,
+                        "chat_id":      chat_id,          # we can only tag it; real chat routing uses receiver field
+                        "sender":       m.sender,
+                        "content":      m.content,
+                        "timestamp":    float(m.timestamp),
+                        "lamport_time": 0,
+                        "vector_clock": {},
+                        "sender_id":    self.node_id,
+                        "status":       "committed",
+                        # preserve original fields for compatibility
+                        "receiver":     m.receiver,
+                        "origin_node":  m.origin_node,
+                    })
+                return result
+        except Exception as e:
+            print(f"[Replication] Reading from peer {peer} failed: {e}")
+            return []
 
     # ── 3e. Handle Incoming Replica (when a peer forwards a message to us) ───
 

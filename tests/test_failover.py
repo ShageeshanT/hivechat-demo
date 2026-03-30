@@ -16,9 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from node.consensus import RaftNode, NodeState
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 class MockReplication:
     """Mock replication module to track apply_committed_entry calls."""
@@ -37,9 +35,7 @@ def create_cluster(n: int = 3, replication=None):
     return nodes
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Test: Leader Failover
-# ─────────────────────────────────────────────────────────────────────────────
 
 class TestLeaderFailover:
     """
@@ -106,9 +102,7 @@ class TestLeaderFailover:
         assert result is False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Test: Node Rejoin
-# ─────────────────────────────────────────────────────────────────────────────
 
 class TestNodeRejoin:
     """

@@ -12,15 +12,17 @@ import time
 import logging
 import grpc
 from concurrent import futures
+from pathlib import Path
 from typing import Tuple
 
 logger = logging.getLogger("hivechat.time_sync_service")
 
-# Add proto directory to path so generated stubs can be imported
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'proto'))
+# Ensure the project root is on sys.path so `proto` package is importable
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-import hivechat_pb2
-import hivechat_pb2_grpc
+from proto import hivechat_pb2, hivechat_pb2_grpc
 
 
 class TimeSyncServicer(hivechat_pb2_grpc.TimeSyncServiceServicer):
@@ -93,21 +95,19 @@ def sync_once(target_addr: str, node_id: int) -> dict:
     t_send = time.time()
 
     try:
-        channel = grpc.insecure_channel(target_addr)
-        stub = hivechat_pb2_grpc.TimeSyncServiceStub(channel)
+        with grpc.insecure_channel(target_addr) as channel:
+            stub = hivechat_pb2_grpc.TimeSyncServiceStub(channel)
 
-        request = hivechat_pb2.TimeSyncRequest(
-            node_id=node_id,
-            client_send_time=t_send,
-        )
+            request = hivechat_pb2.TimeSyncRequest(
+                node_id=node_id,
+                client_send_time=t_send,
+            )
 
-        response = stub.GetTime(request, timeout=2.0)
-        t_recv = time.time()
+            response = stub.GetTime(request, timeout=2.0)
+            t_recv = time.time()
 
         rtt = t_recv - t_send
         offset = response.server_time - (t_send + rtt / 2)
-
-        channel.close()
 
         return {
             'offset': offset,
@@ -115,4 +115,6 @@ def sync_once(target_addr: str, node_id: int) -> dict:
             'server_node_id': response.server_node_id,
         }
     except grpc.RpcError as e:
+        return {'error': str(e)}
+    except Exception as e:
         return {'error': str(e)}
