@@ -114,7 +114,10 @@ def get_messages():
 
 @app.route("/api/all-messages", methods=["GET"])
 def get_all_messages():
-    """Return ALL messages where user is sender OR receiver (for chat view)."""
+    """Return ALL messages where user is sender OR receiver (for chat view).
+    Queries every available server and merges the results so no messages
+    are lost even when some nodes hold messages others don't.
+    """
     username = request.args.get("username")
     servers_param = request.args.get("servers", "localhost:5001,localhost:5002,localhost:5003")
     servers = [s.strip() for s in servers_param.split(",") if s.strip()]
@@ -123,24 +126,20 @@ def get_all_messages():
         return jsonify({"error": "Username required"}), 400
 
     touch_user(username, servers)
-    client = get_client(username, servers)
-    try:
-        # Get messages where user is receiver
-        received = client.receive_messages()
 
-        # Also get ALL messages from the cluster and filter for sent ones
+    try:
         import grpc
         from proto import hivechat_pb2, hivechat_pb2_grpc
 
-        all_msgs = []
+        all_msgs_raw = []
         for server in servers:
             try:
                 with grpc.insecure_channel(server) as channel:
                     stub = hivechat_pb2_grpc.MessagingServiceStub(channel)
                     req = hivechat_pb2.GetMessagesRequest(node_id="client")
-                    resp = stub.GetMessages(req, timeout=10.0)
+                    resp = stub.GetMessages(req, timeout=5.0)
                     for m in resp.messages:
-                        all_msgs.append({
+                        all_msgs_raw.append({
                             "message_id": m.message_id,
                             "sender": m.sender,
                             "receiver": m.receiver,
@@ -148,17 +147,16 @@ def get_all_messages():
                             "timestamp": m.timestamp,
                             "origin_node": m.origin_node,
                         })
-                break  # Got from one server, no need to try others
             except Exception:
+                # This server is down; try the next one
                 continue
 
-        # Deduplicate by message_id
+        # Deduplicate by message_id across all servers, keep messages involving this user
         seen = set()
         unique = []
-        for msg in all_msgs:
+        for msg in all_msgs_raw:
             if msg["message_id"] not in seen:
                 seen.add(msg["message_id"])
-                # Keep only messages involving this user
                 if msg["sender"] == username or msg["receiver"] == username:
                     unique.append(msg)
 
