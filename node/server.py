@@ -39,6 +39,7 @@ from node.fault import FaultToleranceManager
 from node.replication import ReplicationManager
 from node.time_sync import TimeSyncer, MessageReorderer
 from node.consensus import RaftNode
+from node.time_sync_service import TimeSyncServicer
 
 # Heartbeat RPC timeout (seconds) – short so failure detection stays responsive
 HEARTBEAT_TIMEOUT = 2.0
@@ -62,6 +63,27 @@ class MessagingServicer(hivechat_pb2_grpc.MessagingServiceServicer):
     def __init__(self, node: "HiveChatNode"):
         self._node = node
 
+    @staticmethod
+    def _to_replication_dict(message: dict, node_id: int) -> dict:
+        """
+        Convert a fault-layer message dict to the format expected by
+        ReplicationManager (uses 'id' instead of 'message_id', adds
+        the fields needed by MessageReorderer and VectorClock).
+        """
+        return {
+            "id":           message["message_id"],
+            "chat_id":      message["receiver"],   # use receiver as chat room
+            "sender":       message["sender"],
+            "content":      message["content"],
+            "timestamp":    float(message["timestamp"]),
+            "lamport_time": 0,
+            "vector_clock": {},
+            "sender_id":    node_id,
+            "status":       "committed",
+            "receiver":     message["receiver"],
+            "origin_node":  message["origin_node"],
+        }
+
     def SendMessage(self, request, context):
         msg_proto = request.message
         message = {
@@ -72,7 +94,20 @@ class MessagingServicer(hivechat_pb2_grpc.MessagingServiceServicer):
             "timestamp":   msg_proto.timestamp,
             "origin_node": msg_proto.origin_node,
         }
+        # 1. Persist + replicate via FaultToleranceManager (SQLite, durable)
         result = self._node.fault_manager.handle_client_message(message)
+
+        # 2. Also notify ReplicationManager so vector clocks and the causal
+        #    re-ordering buffer are updated on every real incoming message.
+        try:
+            rm_msg = self._to_replication_dict(message, self._node.node_id)
+            rm_msg["vector_clock"] = self._node.replication_manager.vector_clock.tick()
+            if self._node.time_syncer:
+                rm_msg["lamport_time"] = self._node.time_syncer.lamport.tick()
+            self._node.replication_manager.store.save(rm_msg)
+        except Exception:
+            pass  # replication-manager accounting is best-effort; SQLite is truth
+
         return hivechat_pb2.StatusResponse(
             success=True,
             status=result["status"],
@@ -124,7 +159,19 @@ class FaultServicer(hivechat_pb2_grpc.FaultServiceServicer):
             "timestamp":   msg_proto.timestamp,
             "origin_node": msg_proto.origin_node,
         }
+        # 1. Persist via FaultToleranceManager (SQLite, durable)
         result = self._node.fault_manager.handle_replica_message(message)
+
+        # 2. Also route through ReplicationManager so vector clocks are merged
+        #    and causal re-ordering (MessageReorderer) is applied on receive.
+        try:
+            rm_msg = MessagingServicer._to_replication_dict(
+                message, self._node.node_id
+            )
+            self._node.replication_manager.receive_replica(rm_msg)
+        except Exception:
+            pass  # best-effort; SQLite is the source of truth
+
         return hivechat_pb2.StatusResponse(
             success=True,
             status=result["status"],
@@ -199,6 +246,9 @@ class HiveChatNode:
 
         # ── 4. Fault Tolerance Manager ────────────────────────────────────
         print(f"[HiveChat] Initializing Fault Tolerance module …")
+        # Replicate to ALL peers so any single node failure is recoverable.
+        # replication_factor = total nodes in cluster (self + all peers).
+        full_replication_factor = len(self.peers) + 1
         self.fault_manager = FaultToleranceManager(
             node_id=f"node{self.node_id}",
             peers=self.peers,
@@ -206,7 +256,7 @@ class HiveChatNode:
             replicate_fn=self._replicate_to_peer,
             fetch_messages_fn=self._fetch_messages_from_peer,
             store_path=store_path,
-            replication_factor=2,
+            replication_factor=full_replication_factor,
             heartbeat_interval=3.0,
             missed_threshold=3,        # 3 missed beats → mark DEAD
         )
@@ -300,15 +350,22 @@ class HiveChatNode:
         so offset estimates stay relative to the authoritative clock.
         """
         leader_id = self.raft.get_leader()
-        if leader_id == -1 or not self.peers:
+        if leader_id == -1:
             return
         if leader_id == self.node_id:
-            # We are leader — use the first follower as reference
-            self.time_syncer.set_reference(self.peers[0])
+            # We are the leader — sync against any available peer
+            if self.peers:
+                self.time_syncer.set_reference(self.peers[0])
         else:
-            idx = leader_id - 1
-            if 0 <= idx < len(self.peers):
-                self.time_syncer.set_reference(self.peers[idx])
+            # Try to find the peer whose port matches the leader's node_id.
+            # Convention: node N listens on port 5000+N (e.g. node1→5001).
+            expected_port = str(5000 + leader_id)
+            leader_addr = next(
+                (p for p in self.peers if p.split(":")[-1] == expected_port),
+                self.peers[0] if self.peers else None,
+            )
+            if leader_addr:
+                self.time_syncer.set_reference(leader_addr)
 
     # ── server lifecycle ──────────────────────────────────────────────────
 
@@ -328,6 +385,9 @@ class HiveChatNode:
         )
         hivechat_pb2_grpc.add_FaultServiceServicer_to_server(
             FaultServicer(self), self._grpc_server
+        )
+        hivechat_pb2_grpc.add_TimeSyncServiceServicer_to_server(
+            TimeSyncServicer(self.node_id), self._grpc_server
         )
         self._grpc_server.add_insecure_port(f"[::]:{self.port}")
         self._grpc_server.start()

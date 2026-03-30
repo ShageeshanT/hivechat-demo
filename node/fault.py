@@ -205,7 +205,10 @@ class FailureDetector:
         self.on_peer_recovered = on_peer_recovered
 
         self._missed: Dict[str, int] = {p: 0 for p in peers}
-        self._status: Dict[str, bool] = {p: False for p in peers}
+        # Start optimistically: assume peers are alive until proven dead.
+        # This prevents messages sent during the startup window from being
+        # silently un-replicated while waiting for the first heartbeat cycle.
+        self._status: Dict[str, bool] = {p: True for p in peers}
         
         # Per-peer latency histogram (rolling min/max/last)
         self._latencies: Dict[str, Dict[str, float]] = {
@@ -326,20 +329,17 @@ class PendingReplicationQueue:
                     (peer, message["message_id"])
                 )
 
-    def drain(self, peer: str) -> List[Message]:
-        """Return and remove all pending messages for a peer."""
+    def drain(self, peer: str) -> List[str]:
+        """Return and remove all pending message IDs for a peer."""
         with self._lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
             with conn:
-                cursor = conn.execute("""
-                    SELECT m.* FROM messages m 
-                    JOIN pending_queue pq ON m.message_id = pq.message_id 
-                    WHERE pq.peer = ?
-                """, (peer,))
+                cursor = conn.execute(
+                    "SELECT message_id FROM pending_queue WHERE peer = ?",
+                    (peer,)
+                )
                 rows = cursor.fetchall()
                 conn.execute("DELETE FROM pending_queue WHERE peer = ?", (peer,))
-            
-            return [dict(row) for row in rows]
+            return [row[0] for row in rows]
 
     def pending_count(self, peer: str) -> int:
         with self._lock, contextlib.closing(sqlite3.connect(self.db_path)) as conn:
@@ -568,13 +568,21 @@ class FaultToleranceManager:
             live_peers = self.detector.get_live_peers()
             for peer in live_peers:
                 if self.pending_queue.pending_count(peer) > 0:
-                    pending = self.pending_queue.drain(peer)
+                    pending_ids = self.pending_queue.drain(peer)
                     retried = 0
-                    for message in pending:
+                    for msg_id in pending_ids:
+                        # Look up the full message from the persistent store
+                        full_msgs = [
+                            m for m in self.store.get_all_messages()
+                            if m["message_id"] == msg_id
+                        ]
+                        if not full_msgs:
+                            continue  # Message was purged; skip
+                        message = full_msgs[0]
                         if self._try_replicate(peer, message):
                             retried += 1
                         else:
-                            self.pending_queue.enqueue(peer, message) # Still failed, re-queue
+                            self.pending_queue.enqueue(peer, message)  # Still failed, re-queue
                     
                     if retried:
                         with self._stats_lock:
@@ -586,11 +594,21 @@ class FaultToleranceManager:
             time.sleep(5.0)
 
     def _on_peer_recovered(self, peer: str) -> None:
-        pending = self.pending_queue.drain(peer)
+        pending_ids = self.pending_queue.drain(peer)
         retried = 0
-        for message in pending:
+        for msg_id in pending_ids:
+            # Look up the full message from the persistent store
+            full_msgs = [
+                m for m in self.store.get_all_messages()
+                if m["message_id"] == msg_id
+            ]
+            if not full_msgs:
+                continue
+            message = full_msgs[0]
             if self._try_replicate(peer, message):
                 retried += 1
+            else:
+                self.pending_queue.enqueue(peer, message)  # Re-queue if still failing
         if retried:
             self.metrics["pending_retried"] += retried
             logger.info(f"Peer {peer} recovered -> retried {retried} queued message(s).")
