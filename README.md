@@ -1,4 +1,4 @@
-# 🐝 HiveChat — Fault-Tolerant Distributed Messaging System
+# HiveChat — Fault-Tolerant Distributed Messaging System
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
 ![gRPC](https://img.shields.io/badge/gRPC-Framework-green?style=for-the-badge&logo=grpc)
