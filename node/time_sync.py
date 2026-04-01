@@ -144,6 +144,9 @@ class TimeSyncer:
     MAX_SYNC_INTERVAL: float = 30.0   # slowest sync rate when stable
     DRIFT_THRESHOLD_MS: float = 50.0  # offset change > this triggers faster sync
 
+    # RTT-based outlier rejection: discard samples with abnormal round-trip time
+    RTT_REJECT_MULTIPLIER: float = 3.0  # reject if rtt > median_rtt * this
+
     def __init__(self, node_id: int, reference_addr: Optional[str] = None,
                  config: Optional[SyncConfig] = None):
         self.node_id        = node_id
@@ -155,6 +158,8 @@ class TimeSyncer:
         self.lamport  = LamportClock()         # each node's Lamport clock lives here
         self._current_interval: float = self.SYNC_INTERVAL  # adaptive interval
         self._prev_offset: float = 0.0         # previous offset for drift detection
+        self._rtt_samples: list[float] = []    # RTT history for outlier detection
+        self._rejected_count: int = 0          # how many samples were rejected
 
         # Apply config overrides if provided
         if config:
@@ -183,6 +188,7 @@ class TimeSyncer:
         with self._lock:
             self.reference_addr = addr
             self._samples.clear()
+            self._rtt_samples.clear()
             self.offset = 0.0
         logger.info("Node %d: reference changed to %s", self.node_id, addr)
 
@@ -233,12 +239,13 @@ class TimeSyncer:
 
         Tries the real gRPC call first (via time_sync_service.sync_once).
         Falls back to a simulated offset if gRPC is unavailable.
+        Samples with abnormally high RTT are rejected as outliers.
         """
         try:
             from node.time_sync_service import sync_once
             result = sync_once(self.reference_addr, self.node_id)
             if 'error' not in result:
-                self._add_sample(result['offset'])
+                self._add_sample(result['offset'], result.get('rtt', 0))
                 return
             # gRPC call failed — fall through to stub
         except ImportError:
@@ -250,11 +257,45 @@ class TimeSyncer:
         t_recv   = time.time()
         rtt      = t_recv - t_send
         offset   = t_server - (t_send + rtt / 2)
-        self._add_sample(offset)
+        self._add_sample(offset, rtt)
 
-    def _add_sample(self, offset: float):
-        """Add a new offset sample and recompute the median."""
+    def _is_rtt_outlier(self, rtt: float) -> bool:
+        """Check if a round-trip time is an outlier compared to recent history.
+
+        Uses the median RTT as baseline. A sample is rejected if its RTT
+        exceeds RTT_REJECT_MULTIPLIER times the median. This filters out
+        samples taken during network congestion or GC pauses, which would
+        produce inaccurate offset estimates.
+        """
+        if rtt <= 0 or len(self._rtt_samples) < 3:
+            return False  # not enough history to judge
+        median_rtt = statistics.median(self._rtt_samples)
+        if median_rtt <= 0:
+            return False
+        return rtt > median_rtt * self.RTT_REJECT_MULTIPLIER
+
+    def _add_sample(self, offset: float, rtt: float = 0.0):
+        """Add a new offset sample and recompute the median.
+
+        If the RTT for this sample is abnormally high (outlier), the offset
+        sample is discarded to avoid corrupting the estimate with data from
+        congested network conditions.
+        """
+        # Check for RTT outlier before accepting the sample
+        if rtt > 0 and self._is_rtt_outlier(rtt):
+            self._rejected_count += 1
+            logger.info("Node %d: rejected sample (rtt=%.1f ms, threshold=%.1f ms)",
+                        self.node_id, rtt * 1000,
+                        statistics.median(self._rtt_samples) * 1000 * self.RTT_REJECT_MULTIPLIER)
+            return
+
         with self._lock:
+            # Track RTT history
+            if rtt > 0:
+                self._rtt_samples.append(rtt)
+                if len(self._rtt_samples) > self.SAMPLE_COUNT:
+                    self._rtt_samples.pop(0)
+
             self._samples.append(offset)
             if len(self._samples) > self.SAMPLE_COUNT:
                 self._samples.pop(0)
@@ -330,6 +371,8 @@ class TimeSyncer:
                 "sync_interval": self.SYNC_INTERVAL,
                 "current_interval": round(self._current_interval, 3),
                 "max_offset_ms": self.MAX_OFFSET_MS,
+                "rejected_samples": self._rejected_count,
+                "rtt_samples_ms": [round(r * 1000, 3) for r in self._rtt_samples],
             }
 
 
