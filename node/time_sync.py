@@ -43,6 +43,7 @@ import threading
 import statistics
 from typing import Optional
 from node.sync_config import SyncConfig
+from node.sync_logger import SyncLogger
 
 logger = logging.getLogger("hivechat.time_sync")
 
@@ -160,6 +161,7 @@ class TimeSyncer:
         self._prev_offset: float = 0.0         # previous offset for drift detection
         self._rtt_samples: list[float] = []    # RTT history for outlier detection
         self._rejected_count: int = 0          # how many samples were rejected
+        self.slog = SyncLogger(node_id)        # structured event logger
 
         # Apply config overrides if provided
         if config:
@@ -175,10 +177,12 @@ class TimeSyncer:
         t.start()
         logger.info("Node %d: sync thread started (interval=%.1fs, samples=%d)",
                     self.node_id, self.SYNC_INTERVAL, self.SAMPLE_COUNT)
+        self.slog.sync_started()
 
     def stop(self):
         """Stop the background sync thread."""
         self._running = False
+        self.slog.sync_stopped()
 
     def set_reference(self, addr: str):
         """Update which node we sync against (call when Raft leader changes).
@@ -186,11 +190,13 @@ class TimeSyncer:
         Clears old samples since they came from a different reference clock.
         """
         with self._lock:
+            old_addr = self.reference_addr
             self.reference_addr = addr
             self._samples.clear()
             self._rtt_samples.clear()
             self.offset = 0.0
         logger.info("Node %d: reference changed to %s", self.node_id, addr)
+        self.slog.reference_changed(old_addr, addr)
 
     # ── Core Sync Logic ──────────────────────────────────────────────────
 
@@ -225,6 +231,7 @@ class TimeSyncer:
             )
             logger.info("Node %d: drift %.1f ms detected, interval -> %.1fs",
                         self.node_id, drift_ms, self._current_interval)
+            self.slog.interval_adapted(self._current_interval, drift_ms, "faster")
         else:
             # Stable — gradually slow down toward the default
             self._current_interval = min(
@@ -284,9 +291,10 @@ class TimeSyncer:
         # Check for RTT outlier before accepting the sample
         if rtt > 0 and self._is_rtt_outlier(rtt):
             self._rejected_count += 1
+            threshold = statistics.median(self._rtt_samples) * 1000 * self.RTT_REJECT_MULTIPLIER
             logger.info("Node %d: rejected sample (rtt=%.1f ms, threshold=%.1f ms)",
-                        self.node_id, rtt * 1000,
-                        statistics.median(self._rtt_samples) * 1000 * self.RTT_REJECT_MULTIPLIER)
+                        self.node_id, rtt * 1000, threshold)
+            self.slog.sample_rejected(rtt * 1000, threshold)
             return
 
         with self._lock:
@@ -304,6 +312,14 @@ class TimeSyncer:
         if abs(self.offset) * 1000 > self.MAX_OFFSET_MS:
             logger.warning("Node %d: large clock offset: %.1f ms",
                            self.node_id, self.offset * 1000)
+            self.slog.offset_warning(self.offset * 1000)
+
+        self.slog.sync_complete(
+            offset_ms=self.offset * 1000,
+            rtt_ms=rtt * 1000,
+            sample_count=len(self._samples),
+            interval=self._current_interval,
+        )
 
     # ── Public API ───────────────────────────────────────────────────────
 
