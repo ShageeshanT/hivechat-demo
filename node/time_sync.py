@@ -139,6 +139,11 @@ class TimeSyncer:
     SAMPLE_COUNT:  int   = 8     # how many samples to median-filter
     MAX_OFFSET_MS: float = 500   # warn if offset exceeds this (milliseconds)
 
+    # Adaptive sync: speed up when drift is detected, slow down when stable
+    MIN_SYNC_INTERVAL: float = 1.0    # fastest sync rate (seconds)
+    MAX_SYNC_INTERVAL: float = 30.0   # slowest sync rate when stable
+    DRIFT_THRESHOLD_MS: float = 50.0  # offset change > this triggers faster sync
+
     def __init__(self, node_id: int, reference_addr: Optional[str] = None,
                  config: Optional[SyncConfig] = None):
         self.node_id        = node_id
@@ -148,12 +153,15 @@ class TimeSyncer:
         self._lock    = threading.Lock()
         self._running = False
         self.lamport  = LamportClock()         # each node's Lamport clock lives here
+        self._current_interval: float = self.SYNC_INTERVAL  # adaptive interval
+        self._prev_offset: float = 0.0         # previous offset for drift detection
 
         # Apply config overrides if provided
         if config:
             self.SYNC_INTERVAL = config.get("sync_interval")
             self.SAMPLE_COUNT  = config.get("sample_count")
             self.MAX_OFFSET_MS = config.get("max_offset_ms")
+            self._current_interval = self.SYNC_INTERVAL
 
     def start(self):
         """Start the background sync thread (daemon, won't block shutdown)."""
@@ -181,11 +189,44 @@ class TimeSyncer:
     # ── Core Sync Logic ──────────────────────────────────────────────────
 
     def _sync_loop(self):
-        """Background loop: periodically sync with the reference node."""
+        """Background loop: periodically sync with the reference node.
+
+        Uses adaptive interval — syncs faster when drift is detected,
+        slows down when the offset is stable.
+        """
         while self._running:
             if self.reference_addr:
                 self._do_sync()
-            time.sleep(self.SYNC_INTERVAL)
+                self._adapt_interval()
+            time.sleep(self._current_interval)
+
+    def _adapt_interval(self):
+        """Adjust the sync interval based on how much the offset is changing.
+
+        If the offset changed significantly since the last sync, we speed up
+        to converge faster. If the offset is stable, we slow down to reduce
+        network overhead.
+        """
+        with self._lock:
+            drift_ms = abs(self.offset - self._prev_offset) * 1000
+            self._prev_offset = self.offset
+
+        if drift_ms > self.DRIFT_THRESHOLD_MS:
+            # Large drift detected — sync faster
+            self._current_interval = max(
+                self.MIN_SYNC_INTERVAL,
+                self._current_interval * 0.5
+            )
+            logger.info("Node %d: drift %.1f ms detected, interval -> %.1fs",
+                        self.node_id, drift_ms, self._current_interval)
+        else:
+            # Stable — gradually slow down toward the default
+            self._current_interval = min(
+                self.MAX_SYNC_INTERVAL,
+                self._current_interval * 1.2
+            )
+            # Don't exceed the configured default
+            self._current_interval = min(self._current_interval, self.MAX_SYNC_INTERVAL)
 
     def _do_sync(self):
         """Perform one round-trip sync with the reference node.
@@ -266,6 +307,10 @@ class TimeSyncer:
         with self._lock:
             return len(self._samples)
 
+    def get_current_interval(self) -> float:
+        """Return the current adaptive sync interval in seconds."""
+        return self._current_interval
+
     def get_stats(self) -> dict:
         """Return a snapshot of all sync metrics for monitoring.
 
@@ -283,6 +328,7 @@ class TimeSyncer:
                 "lamport_time": self.lamport.get(),
                 "running": self._running,
                 "sync_interval": self.SYNC_INTERVAL,
+                "current_interval": round(self._current_interval, 3),
                 "max_offset_ms": self.MAX_OFFSET_MS,
             }
 
