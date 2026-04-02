@@ -75,9 +75,15 @@ class LamportClock:
     physical time correction (TimeSyncer).
     """
 
+    # Anomaly detection: warn if a received clock value jumps by more than this
+    JUMP_THRESHOLD: int = 1000
+
     def __init__(self):
         self._time: int = 0
         self._lock = threading.Lock()
+        self._anomalies: list[dict] = []  # log of detected anomalies
+        self._total_ticks: int = 0
+        self._total_updates: int = 0
 
     def tick(self) -> int:
         """Increment the clock (call before sending an event).
@@ -85,7 +91,11 @@ class LamportClock:
         Returns the new clock value to embed in the outgoing message.
         """
         with self._lock:
+            prev = self._time
             self._time += 1
+            self._total_ticks += 1
+            # Invariant: clock must always increase
+            assert self._time > prev, "Lamport clock failed to increment"
             return self._time
 
     def update(self, received_time: int) -> int:
@@ -93,6 +103,10 @@ class LamportClock:
 
         Call this on RECEIVE of a message with an embedded Lamport time.
         Implements: clock = max(local, received) + 1
+
+        Validates the incoming value and detects anomalies:
+          - Negative clock values (protocol violation)
+          - Large jumps that may indicate a corrupted or rogue node
 
         Parameters
         ----------
@@ -105,13 +119,60 @@ class LamportClock:
             The updated local clock value.
         """
         with self._lock:
+            self._total_updates += 1
+
+            # Validate: Lamport times must be non-negative
+            if received_time < 0:
+                self._record_anomaly("negative_clock", received_time)
+                logger.warning("Lamport anomaly: negative value %d received", received_time)
+                received_time = 0  # clamp to safe value
+
+            # Detect large jumps that may indicate a misbehaving node
+            jump = received_time - self._time
+            if jump > self.JUMP_THRESHOLD:
+                self._record_anomaly("large_jump", received_time, jump=jump)
+                logger.warning("Lamport anomaly: jump of %d (local=%d, received=%d)",
+                               jump, self._time, received_time)
+
+            prev = self._time
             self._time = max(self._time, received_time) + 1
+            # Invariant: must strictly increase after merge
+            assert self._time > prev, "Lamport clock did not advance after update"
             return self._time
 
     def get(self) -> int:
         """Return the current clock value (thread-safe read)."""
         with self._lock:
             return self._time
+
+    def _record_anomaly(self, kind: str, received: int, **extra):
+        """Record a detected anomaly for later inspection."""
+        entry = {
+            "kind": kind,
+            "received": received,
+            "local_at_time": self._time,
+            "ts": time.time(),
+            **extra,
+        }
+        self._anomalies.append(entry)
+        # Keep only last 50 anomalies to bound memory
+        if len(self._anomalies) > 50:
+            self._anomalies.pop(0)
+
+    def get_anomalies(self) -> list[dict]:
+        """Return a copy of all detected anomalies."""
+        with self._lock:
+            return list(self._anomalies)
+
+    def get_stats(self) -> dict:
+        """Return clock statistics for monitoring."""
+        with self._lock:
+            return {
+                "current_time": self._time,
+                "total_ticks": self._total_ticks,
+                "total_updates": self._total_updates,
+                "anomaly_count": len(self._anomalies),
+            }
 
 
 # SECTION 2: NTP-Style Time Synchronization
@@ -454,13 +515,30 @@ class MessageReorderer:
             self._buffer.append(message)
             self._flush(on_deliver)
 
+    @staticmethod
+    def _sort_key(msg: dict):
+        """Sort key for buffered messages: Lamport time first, then timestamp.
+
+        When multiple messages become deliverable at the same time (e.g. after
+        a missing dependency arrives), we deliver the oldest ones first. This
+        ensures a consistent delivery order across all nodes.
+        """
+        return (msg.get("lamport_time", 0), msg.get("timestamp", 0))
+
     def _flush(self, on_deliver) -> None:
         """Release all buffered messages whose causal dependencies are met,
-        or that have exceeded the buffer timeout."""
+        or that have exceeded the buffer timeout.
+
+        Messages are sorted by Lamport time before delivery so that when
+        multiple messages become ready simultaneously, older messages
+        (lower Lamport time) are delivered first.
+        """
         now = time.time()
         changed = True
         while changed:
             changed = False
+            # Sort buffer so oldest messages are checked first
+            self._buffer.sort(key=self._sort_key)
             still_buffered = []
             for msg in self._buffer:
                 timed_out = (now - msg.get("_buffered_at", now)) >= self._buffer_timeout
