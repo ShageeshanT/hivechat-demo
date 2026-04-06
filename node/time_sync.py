@@ -43,6 +43,7 @@ import threading
 import statistics
 from typing import Optional
 from node.sync_config import SyncConfig
+from node.sync_logger import SyncLogger
 
 logger = logging.getLogger("hivechat.time_sync")
 
@@ -74,9 +75,15 @@ class LamportClock:
     physical time correction (TimeSyncer).
     """
 
+    # Anomaly detection: warn if a received clock value jumps by more than this
+    JUMP_THRESHOLD: int = 1000
+
     def __init__(self):
         self._time: int = 0
         self._lock = threading.Lock()
+        self._anomalies: list[dict] = []  # log of detected anomalies
+        self._total_ticks: int = 0
+        self._total_updates: int = 0
 
     def tick(self) -> int:
         """Increment the clock (call before sending an event).
@@ -84,7 +91,11 @@ class LamportClock:
         Returns the new clock value to embed in the outgoing message.
         """
         with self._lock:
+            prev = self._time
             self._time += 1
+            self._total_ticks += 1
+            # Invariant: clock must always increase
+            assert self._time > prev, "Lamport clock failed to increment"
             return self._time
 
     def update(self, received_time: int) -> int:
@@ -92,6 +103,10 @@ class LamportClock:
 
         Call this on RECEIVE of a message with an embedded Lamport time.
         Implements: clock = max(local, received) + 1
+
+        Validates the incoming value and detects anomalies:
+          - Negative clock values (protocol violation)
+          - Large jumps that may indicate a corrupted or rogue node
 
         Parameters
         ----------
@@ -104,13 +119,60 @@ class LamportClock:
             The updated local clock value.
         """
         with self._lock:
+            self._total_updates += 1
+
+            # Validate: Lamport times must be non-negative
+            if received_time < 0:
+                self._record_anomaly("negative_clock", received_time)
+                logger.warning("Lamport anomaly: negative value %d received", received_time)
+                received_time = 0  # clamp to safe value
+
+            # Detect large jumps that may indicate a misbehaving node
+            jump = received_time - self._time
+            if jump > self.JUMP_THRESHOLD:
+                self._record_anomaly("large_jump", received_time, jump=jump)
+                logger.warning("Lamport anomaly: jump of %d (local=%d, received=%d)",
+                               jump, self._time, received_time)
+
+            prev = self._time
             self._time = max(self._time, received_time) + 1
+            # Invariant: must strictly increase after merge
+            assert self._time > prev, "Lamport clock did not advance after update"
             return self._time
 
     def get(self) -> int:
         """Return the current clock value (thread-safe read)."""
         with self._lock:
             return self._time
+
+    def _record_anomaly(self, kind: str, received: int, **extra):
+        """Record a detected anomaly for later inspection."""
+        entry = {
+            "kind": kind,
+            "received": received,
+            "local_at_time": self._time,
+            "ts": time.time(),
+            **extra,
+        }
+        self._anomalies.append(entry)
+        # Keep only last 50 anomalies to bound memory
+        if len(self._anomalies) > 50:
+            self._anomalies.pop(0)
+
+    def get_anomalies(self) -> list[dict]:
+        """Return a copy of all detected anomalies."""
+        with self._lock:
+            return list(self._anomalies)
+
+    def get_stats(self) -> dict:
+        """Return clock statistics for monitoring."""
+        with self._lock:
+            return {
+                "current_time": self._time,
+                "total_ticks": self._total_ticks,
+                "total_updates": self._total_updates,
+                "anomaly_count": len(self._anomalies),
+            }
 
 
 # SECTION 2: NTP-Style Time Synchronization
@@ -139,6 +201,14 @@ class TimeSyncer:
     SAMPLE_COUNT:  int   = 8     # how many samples to median-filter
     MAX_OFFSET_MS: float = 500   # warn if offset exceeds this (milliseconds)
 
+    # Adaptive sync: speed up when drift is detected, slow down when stable
+    MIN_SYNC_INTERVAL: float = 1.0    # fastest sync rate (seconds)
+    MAX_SYNC_INTERVAL: float = 30.0   # slowest sync rate when stable
+    DRIFT_THRESHOLD_MS: float = 50.0  # offset change > this triggers faster sync
+
+    # RTT-based outlier rejection: discard samples with abnormal round-trip time
+    RTT_REJECT_MULTIPLIER: float = 3.0  # reject if rtt > median_rtt * this
+
     def __init__(self, node_id: int, reference_addr: Optional[str] = None,
                  config: Optional[SyncConfig] = None):
         self.node_id        = node_id
@@ -148,12 +218,18 @@ class TimeSyncer:
         self._lock    = threading.Lock()
         self._running = False
         self.lamport  = LamportClock()         # each node's Lamport clock lives here
+        self._current_interval: float = self.SYNC_INTERVAL  # adaptive interval
+        self._prev_offset: float = 0.0         # previous offset for drift detection
+        self._rtt_samples: list[float] = []    # RTT history for outlier detection
+        self._rejected_count: int = 0          # how many samples were rejected
+        self.slog = SyncLogger(node_id)        # structured event logger
 
         # Apply config overrides if provided
         if config:
             self.SYNC_INTERVAL = config.get("sync_interval")
             self.SAMPLE_COUNT  = config.get("sample_count")
             self.MAX_OFFSET_MS = config.get("max_offset_ms")
+            self._current_interval = self.SYNC_INTERVAL
 
     def start(self):
         """Start the background sync thread (daemon, won't block shutdown)."""
@@ -162,10 +238,12 @@ class TimeSyncer:
         t.start()
         logger.info("Node %d: sync thread started (interval=%.1fs, samples=%d)",
                     self.node_id, self.SYNC_INTERVAL, self.SAMPLE_COUNT)
+        self.slog.sync_started()
 
     def stop(self):
         """Stop the background sync thread."""
         self._running = False
+        self.slog.sync_stopped()
 
     def set_reference(self, addr: str):
         """Update which node we sync against (call when Raft leader changes).
@@ -173,31 +251,69 @@ class TimeSyncer:
         Clears old samples since they came from a different reference clock.
         """
         with self._lock:
+            old_addr = self.reference_addr
             self.reference_addr = addr
             self._samples.clear()
+            self._rtt_samples.clear()
             self.offset = 0.0
         logger.info("Node %d: reference changed to %s", self.node_id, addr)
+        self.slog.reference_changed(old_addr, addr)
 
     # ── Core Sync Logic ──────────────────────────────────────────────────
 
     def _sync_loop(self):
-        """Background loop: periodically sync with the reference node."""
+        """Background loop: periodically sync with the reference node.
+
+        Uses adaptive interval — syncs faster when drift is detected,
+        slows down when the offset is stable.
+        """
         while self._running:
             if self.reference_addr:
                 self._do_sync()
-            time.sleep(self.SYNC_INTERVAL)
+                self._adapt_interval()
+            time.sleep(self._current_interval)
+
+    def _adapt_interval(self):
+        """Adjust the sync interval based on how much the offset is changing.
+
+        If the offset changed significantly since the last sync, we speed up
+        to converge faster. If the offset is stable, we slow down to reduce
+        network overhead.
+        """
+        with self._lock:
+            drift_ms = abs(self.offset - self._prev_offset) * 1000
+            self._prev_offset = self.offset
+
+        if drift_ms > self.DRIFT_THRESHOLD_MS:
+            # Large drift detected — sync faster
+            self._current_interval = max(
+                self.MIN_SYNC_INTERVAL,
+                self._current_interval * 0.5
+            )
+            logger.info("Node %d: drift %.1f ms detected, interval -> %.1fs",
+                        self.node_id, drift_ms, self._current_interval)
+            self.slog.interval_adapted(self._current_interval, drift_ms, "faster")
+        else:
+            # Stable — gradually slow down toward the default
+            self._current_interval = min(
+                self.MAX_SYNC_INTERVAL,
+                self._current_interval * 1.2
+            )
+            # Don't exceed the configured default
+            self._current_interval = min(self._current_interval, self.MAX_SYNC_INTERVAL)
 
     def _do_sync(self):
         """Perform one round-trip sync with the reference node.
 
         Tries the real gRPC call first (via time_sync_service.sync_once).
         Falls back to a simulated offset if gRPC is unavailable.
+        Samples with abnormally high RTT are rejected as outliers.
         """
         try:
             from node.time_sync_service import sync_once
             result = sync_once(self.reference_addr, self.node_id)
             if 'error' not in result:
-                self._add_sample(result['offset'])
+                self._add_sample(result['offset'], result.get('rtt', 0))
                 return
             # gRPC call failed — fall through to stub
         except ImportError:
@@ -209,11 +325,46 @@ class TimeSyncer:
         t_recv   = time.time()
         rtt      = t_recv - t_send
         offset   = t_server - (t_send + rtt / 2)
-        self._add_sample(offset)
+        self._add_sample(offset, rtt)
 
-    def _add_sample(self, offset: float):
-        """Add a new offset sample and recompute the median."""
+    def _is_rtt_outlier(self, rtt: float) -> bool:
+        """Check if a round-trip time is an outlier compared to recent history.
+
+        Uses the median RTT as baseline. A sample is rejected if its RTT
+        exceeds RTT_REJECT_MULTIPLIER times the median. This filters out
+        samples taken during network congestion or GC pauses, which would
+        produce inaccurate offset estimates.
+        """
+        if rtt <= 0 or len(self._rtt_samples) < 3:
+            return False  # not enough history to judge
+        median_rtt = statistics.median(self._rtt_samples)
+        if median_rtt <= 0:
+            return False
+        return rtt > median_rtt * self.RTT_REJECT_MULTIPLIER
+
+    def _add_sample(self, offset: float, rtt: float = 0.0):
+        """Add a new offset sample and recompute the median.
+
+        If the RTT for this sample is abnormally high (outlier), the offset
+        sample is discarded to avoid corrupting the estimate with data from
+        congested network conditions.
+        """
+        # Check for RTT outlier before accepting the sample
+        if rtt > 0 and self._is_rtt_outlier(rtt):
+            self._rejected_count += 1
+            threshold = statistics.median(self._rtt_samples) * 1000 * self.RTT_REJECT_MULTIPLIER
+            logger.info("Node %d: rejected sample (rtt=%.1f ms, threshold=%.1f ms)",
+                        self.node_id, rtt * 1000, threshold)
+            self.slog.sample_rejected(rtt * 1000, threshold)
+            return
+
         with self._lock:
+            # Track RTT history
+            if rtt > 0:
+                self._rtt_samples.append(rtt)
+                if len(self._rtt_samples) > self.SAMPLE_COUNT:
+                    self._rtt_samples.pop(0)
+
             self._samples.append(offset)
             if len(self._samples) > self.SAMPLE_COUNT:
                 self._samples.pop(0)
@@ -222,6 +373,14 @@ class TimeSyncer:
         if abs(self.offset) * 1000 > self.MAX_OFFSET_MS:
             logger.warning("Node %d: large clock offset: %.1f ms",
                            self.node_id, self.offset * 1000)
+            self.slog.offset_warning(self.offset * 1000)
+
+        self.slog.sync_complete(
+            offset_ms=self.offset * 1000,
+            rtt_ms=rtt * 1000,
+            sample_count=len(self._samples),
+            interval=self._current_interval,
+        )
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -266,6 +425,10 @@ class TimeSyncer:
         with self._lock:
             return len(self._samples)
 
+    def get_current_interval(self) -> float:
+        """Return the current adaptive sync interval in seconds."""
+        return self._current_interval
+
     def get_stats(self) -> dict:
         """Return a snapshot of all sync metrics for monitoring.
 
@@ -283,7 +446,10 @@ class TimeSyncer:
                 "lamport_time": self.lamport.get(),
                 "running": self._running,
                 "sync_interval": self.SYNC_INTERVAL,
+                "current_interval": round(self._current_interval, 3),
                 "max_offset_ms": self.MAX_OFFSET_MS,
+                "rejected_samples": self._rejected_count,
+                "rtt_samples_ms": [round(r * 1000, 3) for r in self._rtt_samples],
             }
 
 
@@ -349,13 +515,30 @@ class MessageReorderer:
             self._buffer.append(message)
             self._flush(on_deliver)
 
+    @staticmethod
+    def _sort_key(msg: dict):
+        """Sort key for buffered messages: Lamport time first, then timestamp.
+
+        When multiple messages become deliverable at the same time (e.g. after
+        a missing dependency arrives), we deliver the oldest ones first. This
+        ensures a consistent delivery order across all nodes.
+        """
+        return (msg.get("lamport_time", 0), msg.get("timestamp", 0))
+
     def _flush(self, on_deliver) -> None:
         """Release all buffered messages whose causal dependencies are met,
-        or that have exceeded the buffer timeout."""
+        or that have exceeded the buffer timeout.
+
+        Messages are sorted by Lamport time before delivery so that when
+        multiple messages become ready simultaneously, older messages
+        (lower Lamport time) are delivered first.
+        """
         now = time.time()
         changed = True
         while changed:
             changed = False
+            # Sort buffer so oldest messages are checked first
+            self._buffer.sort(key=self._sort_key)
             still_buffered = []
             for msg in self._buffer:
                 timed_out = (now - msg.get("_buffered_at", now)) >= self._buffer_timeout
